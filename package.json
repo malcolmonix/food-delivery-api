@@ -7,7 +7,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test": "node test-ci.js",
-    "test:ci": "npm start & sleep 10 && npm test && pkill -f 'node index.js'"
+    "test:ci": "npm start & sleep 10 && npm test && pkill -f 'node index.js'",
+    "test:sync": "node test-menuverse-order-sync.js"
   },
   "keywords": [
     "graphql",

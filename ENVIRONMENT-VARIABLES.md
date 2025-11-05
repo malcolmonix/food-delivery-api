@@ -32,6 +32,27 @@ PORT=4000
 NODE_ENV=development
 ```
 
+## **Optional: MenuVerse Integration (Secondary Firebase)**
+
+For order status synchronization between MenuVerse and ChopChop, configure a secondary Firebase connection:
+
+```env
+# Secondary Firebase Configuration (MenuVerse)
+SECONDARY_FIREBASE_PROJECT_ID=chopchop-67750
+SECONDARY_FIREBASE_PRIVATE_KEY_ID=your-menuverse-private-key-id
+SECONDARY_FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYOUR_MENUVERSE_PRIVATE_KEY_HERE\n-----END PRIVATE KEY-----\n"
+SECONDARY_FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@chopchop-67750.iam.gserviceaccount.com
+SECONDARY_FIREBASE_CLIENT_ID=your-menuverse-client-id
+SECONDARY_FIREBASE_CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-xxxxx%40chopchop-67750.iam.gserviceaccount.com
+```
+
+**Note:** The secondary Firebase is used to:
+- Sync order status from MenuVerse to ChopChop
+- Relay rider information to customers
+- Enable real-time order tracking across platforms
+
+If not configured, the API will still work but MenuVerse sync features will be disabled.
+
 ## **How to Get Firebase Credentials**
 
 ### **Step 1: Access Firebase Console**
@@ -157,6 +178,123 @@ node -e "const admin = require('firebase-admin'); console.log('Firebase OK')"
 
 ---
 
+## **3. MenuVerse Integration (Optional)**
+
+### **Secondary Firebase Configuration**
+If you want to enable order synchronization between MenuVerse (vendor app) and ChopChop (customer app), configure these variables:
+
+```env
+# MenuVerse Firebase Project Credentials
+SECONDARY_FIREBASE_PROJECT_ID=your-menuverse-project-id
+SECONDARY_FIREBASE_PRIVATE_KEY_ID=your-private-key-id
+SECONDARY_FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour_Private_Key_Here\n-----END PRIVATE KEY-----\n"
+SECONDARY_FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com
+SECONDARY_FIREBASE_CLIENT_ID=your-client-id
+SECONDARY_FIREBASE_CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-xxxxx%40your-project.iam.gserviceaccount.com
+```
+
+### **How It Works**
+
+1. **Order Placement**: When ChopChop users place orders, they're saved to both:
+   - ChopChop Firebase (primary)
+   - MenuVerse Firebase (secondary) - if vendor ID provided
+
+2. **Status Sync**: Three ways to keep orders in sync:
+   - **Manual Sync**: `syncOrderFromMenuVerse` mutation
+   - **Bulk Sync**: `syncAllOrdersFromMenuVerse` mutation  
+   - **Webhook**: `webhookMenuVerseOrderUpdate` mutation (for real-time updates)
+
+3. **Status Mapping**: MenuVerse statuses are automatically mapped to ChopChop statuses:
+   ```
+   PENDING → PENDING_PAYMENT
+   CONFIRMED → CONFIRMED
+   PROCESSING → PROCESSING
+   READY → READY
+   OUT_FOR_DELIVERY → OUT_FOR_DELIVERY
+   DELIVERED → DELIVERED
+   CANCELLED → CANCELLED
+   ```
+
+### **GraphQL Mutations**
+
+```graphql
+# Sync a single order from MenuVerse
+mutation SyncOrder {
+  syncOrderFromMenuVerse(
+    orderId: "ORDER_ID"
+    vendorId: "VENDOR_UID"
+  ) {
+    id
+    orderId
+    orderStatus
+    lastSyncedAt
+    riderInfo {
+      name
+      phone
+      vehicle
+    }
+  }
+}
+
+# Sync all user's orders
+mutation SyncAllOrders {
+  syncAllOrdersFromMenuVerse(
+    limit: 20
+  ) {
+    id
+    orderId
+    orderStatus
+    lastSyncedAt
+  }
+}
+
+# Webhook for MenuVerse to push updates
+mutation WebhookUpdate {
+  webhookMenuVerseOrderUpdate(
+    orderId: "ORDER_ID"
+    status: "CONFIRMED"
+    restaurantId: "VENDOR_UID"
+    restaurantName: "Restaurant Name"
+    riderInfo: {
+      name: "John Doe"
+      phone: "+234-XXX-XXX-XXXX"
+      vehicle: "Motorcycle"
+      plateNumber: "ABC-123"
+    }
+  ) {
+    id
+    orderStatus
+  }
+}
+```
+
+### **Setup Instructions**
+
+1. **Get MenuVerse Firebase Credentials:**
+   - Go to MenuVerse Firebase Console
+   - Settings > Service accounts
+   - Generate new private key
+   - Download JSON file
+
+2. **Extract Values:**
+   - Same process as ChopChop Firebase
+   - Use `SECONDARY_*` prefix for all variables
+
+3. **Test Connection:**
+   ```bash
+   # Place an order with MenuVerse vendor ID
+   # Then sync it back
+   curl -X POST http://localhost:4000/graphql \
+     -H "Content-Type: application/json" \
+     -d '{
+       "query": "mutation { syncOrderFromMenuVerse(orderId: \"ORDER_ID\", vendorId: \"VENDOR_UID\") { orderStatus } }"
+     }'
+   ```
+
+**Note:** If SECONDARY_FIREBASE_* variables are not set, the API will still work but MenuVerse sync features will be disabled.
+
+---
+
 **📋 Checklist:**
 - [ ] Firebase project created
 - [ ] Service account key generated
@@ -164,3 +302,25 @@ node -e "const admin = require('firebase-admin'); console.log('Firebase OK')"
 - [ ] Private key properly formatted with newlines
 - [ ] Server starts without errors
 - [ ] Firebase connection test passes
+- [ ] MenuVerse integration configured (optional)
+- [ ] Order sync tested (if using MenuVerse)
+
+## **Optional: Secondary Firebase (cross-project orders)**
+
+If some customer orders live in a different Firebase project (for example, a legacy MenuVerse project), you can configure a secondary Firestore connection. When set, the API will also query the secondary project's `customer-orders` collection by `customerId` so users see their full order history.
+
+Add these variables to your `api/.env` to enable the secondary connection:
+
+```env
+SECONDARY_FIREBASE_PROJECT_ID=
+SECONDARY_FIREBASE_PRIVATE_KEY_ID=
+SECONDARY_FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+SECONDARY_FIREBASE_CLIENT_EMAIL=
+SECONDARY_FIREBASE_CLIENT_ID=
+SECONDARY_FIREBASE_CLIENT_X509_CERT_URL=
+```
+
+Notes:
+- Use the same fields as the primary service account, prefixed with `SECONDARY_`.
+- Ensure the private key uses `\n` for newlines when placed in `.env`.
+- This is optional; if not set, the API only queries the primary project.
