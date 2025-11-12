@@ -1,7 +1,12 @@
 const { gql } = require('apollo-server-express');
-const { db, admin } = require('./firebase');
+const { admin } = require('./firebase');
+const { dbHelpers, generateId } = require('./database');
+const axios = require('axios');
+const FormData = require('form-data');
 
 const typeDefs = gql`
+  scalar Upload
+
   type User {
     id: ID!
     uid: String!
@@ -256,6 +261,10 @@ const typeDefs = gql`
       displayOrder: Int
     ): MenuCategory!
     deleteMenuCategory(id: ID!): Boolean!
+    uploadImage(file: Upload!, folder: String): String!
+    uploadRestaurantLogo(restaurantId: ID!, file: Upload!): Restaurant!
+    uploadRestaurantBanner(restaurantId: ID!, file: Upload!): Restaurant!
+    uploadMenuItemImage(restaurantId: ID!, menuItemId: ID!, file: Upload!): MenuItem!
   }
 
   input OpeningHourInput {
@@ -310,165 +319,151 @@ const typeDefs = gql`
 
 const resolvers = {
   Query: {
+    /**
+     * Get current authenticated user profile
+     */
     me: async (_, __, { user }) => {
       if (!user) return null;
       return getUserById(user.uid);
     },
+    /**
+     * Get all orders for authenticated user
+     */
     orders: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
-      const ordersSnapshot = await db.collection('orders').where('userId', '==', user.uid).get();
-      return ordersSnapshot.docs.map(doc => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          ...data,
-          statusHistory: data.statusHistory || [],
-          createdAt: data.createdAt || data.orderDate,
-          updatedAt: data.updatedAt || data.orderDate,
-        };
-      });
-    },
-    order: async (_, { id }, { user }) => {
-      if (!user) throw new Error('Authentication required');
-      const orderDoc = await db.collection('orders').doc(id).get();
-      if (!orderDoc.exists) return null;
-
-      const data = orderDoc.data();
-      // Check if order belongs to user
-      if (data.userId !== user.uid) throw new Error('Access denied');
-
-      return {
-        id: orderDoc.id,
-        ...data,
-        statusHistory: data.statusHistory || [],
-        createdAt: data.createdAt || data.orderDate,
-        updatedAt: data.updatedAt || data.orderDate,
-      };
-    },
-    addresses: async (_, __, { user }) => {
-      if (!user) throw new Error('Authentication required');
-      const addressesSnapshot = await db.collection('addresses').where('userId', '==', user.uid).get();
-      return addressesSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
+      
+      const orders = dbHelpers.getOrdersByUserId(user.uid);
+      return orders.map(order => ({
+        ...order,
+        orderItems: JSON.parse(order.orderItems),
+        statusHistory: JSON.parse(order.statusHistory),
+        isPickedUp: Boolean(order.isPickedUp),
       }));
     },
-    address: async (_, { id }, { user }) => {
+    /**
+     * Get single order by ID
+     */
+    order: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      const addressDoc = await db.collection('addresses').doc(id).get();
-      if (!addressDoc.exists) return null;
-
-      const data = addressDoc.data();
-      if (data.userId !== user.uid) throw new Error('Access denied');
+      
+      const order = dbHelpers.getOrderById(id);
+      if (!order) return null;
+      if (order.userId !== user.uid) throw new Error('Access denied');
 
       return {
-        id: addressDoc.id,
-        ...data,
+        ...order,
+        orderItems: JSON.parse(order.orderItems),
+        statusHistory: JSON.parse(order.statusHistory),
+        isPickedUp: Boolean(order.isPickedUp),
       };
     },
+    /**
+     * Get all addresses for authenticated user
+     */
+    addresses: async (_, __, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      const addresses = dbHelpers.getAddressesByUserId(user.uid);
+      return addresses.map(addr => ({
+        ...addr,
+        isDefault: Boolean(addr.isDefault),
+      }));
+    },
+    /**
+     * Get single address by ID
+     */
+    address: async (_, { id }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      const address = dbHelpers.getAddressById(id);
+      if (!address) return null;
+      if (address.userId !== user.uid) throw new Error('Access denied');
+
+      return {
+        ...address,
+        isDefault: Boolean(address.isDefault),
+      };
+    },
+    /**
+     * Search and list restaurants
+     */
     restaurants: async (_, { search, cuisine, limit = 20, offset = 0 }) => {
       try {
-        let query = db.collection('eateries');
-
-        // Apply search filter
-        if (search) {
-          // Note: Firestore doesn't support full-text search natively
-          // This is a simple implementation - in production you'd use Algolia or similar
-          query = query.where('name', '>=', search).where('name', '<=', search + '\uf8ff');
-        }
-
-        // Apply cuisine filter
-        if (cuisine) {
-          query = query.where('cuisine', 'array-contains', cuisine);
-        }
-
-        const snapshot = await query.limit(limit).offset(offset).get();
-        return snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-          cuisine: doc.data().cuisine || [],
-          openingHours: doc.data().openingHours || [],
-          isActive: doc.data().isActive !== false,
-          rating: doc.data().rating || null,
-          reviewCount: doc.data().reviewCount || 0,
+        const restaurants = dbHelpers.getRestaurants({ search, cuisine, limit, offset, isActive: true });
+        return restaurants.map(r => ({
+          ...r,
+          cuisine: JSON.parse(r.cuisine || '[]'),
+          openingHours: JSON.parse(r.openingHours || '[]'),
+          isActive: Boolean(r.isActive),
         }));
       } catch (error) {
         console.error('Error fetching restaurants:', error);
         throw new Error('Failed to fetch restaurants');
       }
     },
+    /**
+     * Get single restaurant by ID
+     */
     restaurant: async (_, { id }) => {
       try {
-        const doc = await db.collection('eateries').doc(id).get();
-        if (!doc.exists) return null;
+        const restaurant = dbHelpers.getRestaurantById(id);
+        if (!restaurant) return null;
 
-        const data = doc.data();
         return {
-          id: doc.id,
-          ...data,
-          cuisine: data.cuisine || [],
-          openingHours: data.openingHours || [],
-          isActive: data.isActive !== false,
-          rating: data.rating || null,
-          reviewCount: data.reviewCount || 0,
+          ...restaurant,
+          cuisine: JSON.parse(restaurant.cuisine || '[]'),
+          openingHours: JSON.parse(restaurant.openingHours || '[]'),
+          isActive: Boolean(restaurant.isActive),
         };
       } catch (error) {
         console.error('Error fetching restaurant:', error);
         throw new Error('Failed to fetch restaurant');
       }
     },
+    /**
+     * Get menu items for a restaurant
+     */
     menuItems: async (_, { restaurantId }) => {
       try {
-        const snapshot = await db.collection('eateries').doc(restaurantId).collection('menu_items').get();
-        return snapshot.docs.map(doc => ({
-          id: doc.id,
-          restaurantId,
-          ...doc.data(),
-          isAvailable: doc.data().isAvailable !== false,
-          isVegetarian: doc.data().isVegetarian || false,
-          isVegan: doc.data().isVegan || false,
-          allergens: doc.data().allergens || [],
+        const items = dbHelpers.getMenuItemsByRestaurantId(restaurantId);
+        return items.map(item => ({
+          ...item,
+          allergens: JSON.parse(item.allergens || '[]'),
+          isAvailable: Boolean(item.isAvailable),
+          isVegetarian: Boolean(item.isVegetarian),
+          isVegan: Boolean(item.isVegan),
         }));
       } catch (error) {
         console.error('Error fetching menu items:', error);
         throw new Error('Failed to fetch menu items');
       }
     },
+    /**
+     * Get single menu item by ID
+     */
     menuItem: async (_, { id }) => {
       try {
-        // This is a simplified implementation - in production you'd need to find the restaurant first
-        // For now, we'll search across all restaurants (not efficient)
-        const eateriesSnapshot = await db.collection('eateries').get();
-        for (const eateryDoc of eateriesSnapshot.docs) {
-          const menuItemDoc = await eateryDoc.ref.collection('menu_items').doc(id).get();
-          if (menuItemDoc.exists) {
-            const data = menuItemDoc.data();
-            return {
-              id: menuItemDoc.id,
-              restaurantId: eateryDoc.id,
-              ...data,
-              isAvailable: data.isAvailable !== false,
-              isVegetarian: data.isVegetarian || false,
-              isVegan: data.isVegan || false,
-              allergens: data.allergens || [],
-            };
-          }
-        }
-        return null;
+        const item = dbHelpers.getMenuItemById(id);
+        if (!item) return null;
+
+        return {
+          ...item,
+          allergens: JSON.parse(item.allergens || '[]'),
+          isAvailable: Boolean(item.isAvailable),
+          isVegetarian: Boolean(item.isVegetarian),
+          isVegan: Boolean(item.isVegan),
+        };
       } catch (error) {
         console.error('Error fetching menu item:', error);
         throw new Error('Failed to fetch menu item');
       }
     },
+    /**
+     * Get menu categories for a restaurant
+     */
     menuCategories: async (_, { restaurantId }) => {
       try {
-        const snapshot = await db.collection('eateries').doc(restaurantId).collection('menu_categories').get();
-        return snapshot.docs.map(doc => ({
-          id: doc.id,
-          restaurantId,
-          ...doc.data(),
-          displayOrder: doc.data().displayOrder || 0,
-        }));
+        return dbHelpers.getMenuCategoriesByRestaurantId(restaurantId);
       } catch (error) {
         console.error('Error fetching menu categories:', error);
         throw new Error('Failed to fetch menu categories');
@@ -1146,10 +1141,228 @@ const resolvers = {
         throw new Error('Failed to delete menu category: ' + error.message);
       }
     },
+    /**
+     * Upload an image to Firebase Storage
+     * @param {Upload} file - File to upload
+     * @param {string} folder - Optional folder path (defaults to 'images')
+     * @returns {Promise<string>} Public URL of uploaded image
+     */
+    uploadImage: async (_, { file, folder }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        const imageUrl = await uploadFileToStorage(file, folder || 'images');
+        return imageUrl;
+      } catch (error) {
+        console.error('Error uploading image:', error);
+        throw new Error('Failed to upload image: ' + error.message);
+      }
+    },
+    /**
+     * Upload restaurant logo and update restaurant
+     * @param {ID} restaurantId - Restaurant ID
+     * @param {Upload} file - Logo image file
+     * @returns {Promise<Restaurant>} Updated restaurant
+     */
+    uploadRestaurantLogo: async (_, { restaurantId, file }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        // Verify restaurant ownership
+        const restaurantRef = db.collection('eateries').doc(restaurantId);
+        const restaurantDoc = await restaurantRef.get();
+
+        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
+        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
+
+        // Upload logo
+        const logoUrl = await uploadFileToStorage(file, `restaurants/${restaurantId}/logo`);
+
+        // Update restaurant
+        await restaurantRef.update({
+          logoUrl,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const updatedDoc = await restaurantRef.get();
+        const updatedData = updatedDoc.data();
+
+        return {
+          id: updatedDoc.id,
+          ...updatedData,
+          cuisine: updatedData.cuisine || [],
+          openingHours: updatedData.openingHours || [],
+          isActive: updatedData.isActive !== false,
+          rating: updatedData.rating || null,
+          reviewCount: updatedData.reviewCount || 0,
+        };
+      } catch (error) {
+        console.error('Error uploading restaurant logo:', error);
+        throw new Error('Failed to upload restaurant logo: ' + error.message);
+      }
+    },
+    /**
+     * Upload restaurant banner and update restaurant
+     * @param {ID} restaurantId - Restaurant ID
+     * @param {Upload} file - Banner image file
+     * @returns {Promise<Restaurant>} Updated restaurant
+     */
+    uploadRestaurantBanner: async (_, { restaurantId, file }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        // Verify restaurant ownership
+        const restaurantRef = db.collection('eateries').doc(restaurantId);
+        const restaurantDoc = await restaurantRef.get();
+
+        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
+        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
+
+        // Upload banner
+        const bannerUrl = await uploadFileToStorage(file, `restaurants/${restaurantId}/banner`);
+
+        // Update restaurant
+        await restaurantRef.update({
+          bannerUrl,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const updatedDoc = await restaurantRef.get();
+        const updatedData = updatedDoc.data();
+
+        return {
+          id: updatedDoc.id,
+          ...updatedData,
+          cuisine: updatedData.cuisine || [],
+          openingHours: updatedData.openingHours || [],
+          isActive: updatedData.isActive !== false,
+          rating: updatedData.rating || null,
+          reviewCount: updatedData.reviewCount || 0,
+        };
+      } catch (error) {
+        console.error('Error uploading restaurant banner:', error);
+        throw new Error('Failed to upload restaurant banner: ' + error.message);
+      }
+    },
+    /**
+     * Upload menu item image and update menu item
+     * @param {ID} restaurantId - Restaurant ID
+     * @param {ID} menuItemId - Menu item ID
+     * @param {Upload} file - Menu item image file
+     * @returns {Promise<MenuItem>} Updated menu item
+     */
+    uploadMenuItemImage: async (_, { restaurantId, menuItemId, file }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        // Verify restaurant ownership
+        const restaurantDoc = await db.collection('eateries').doc(restaurantId).get();
+        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
+        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only manage menu for your own restaurants');
+
+        // Get menu item
+        const menuItemRef = restaurantDoc.ref.collection('menu_items').doc(menuItemId);
+        const menuItemDoc = await menuItemRef.get();
+        if (!menuItemDoc.exists) throw new Error('Menu item not found');
+
+        // Upload image
+        const imageUrl = await uploadFileToStorage(file, `restaurants/${restaurantId}/menu-items`);
+
+        // Update menu item
+        await menuItemRef.update({
+          imageUrl,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const updatedDoc = await menuItemRef.get();
+        const updatedData = updatedDoc.data();
+
+        return {
+          id: updatedDoc.id,
+          restaurantId,
+          ...updatedData,
+          isAvailable: updatedData.isAvailable !== false,
+          isVegetarian: updatedData.isVegetarian || false,
+          isVegan: updatedData.isVegan || false,
+          allergens: updatedData.allergens || [],
+        };
+      } catch (error) {
+        console.error('Error uploading menu item image:', error);
+        throw new Error('Failed to upload menu item image: ' + error.message);
+      }
+    },
   },
 };
 
-// Helper function to get user by ID
+/**
+ * Upload a file to imgbb image hosting service
+ * @param {Upload} file - The file to upload (GraphQL Upload type)
+ * @param {string} folder - Optional folder name for organization (used in image name)
+ * @returns {Promise<string>} The public URL of the uploaded file
+ */
+async function uploadFileToStorage(file, folder = 'images') {
+  const IMGBB_API_KEY = '7423450f81b14c198b65e9d2ba033c5b';
+  
+  try {
+    const { createReadStream, filename, mimetype } = await file;
+    
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
+    if (!allowedTypes.includes(mimetype)) {
+      throw new Error(`Invalid file type: ${mimetype}. Allowed types: ${allowedTypes.join(', ')}`);
+    }
+
+    // Read file stream into buffer
+    const stream = createReadStream();
+    const chunks = [];
+    
+    await new Promise((resolve, reject) => {
+      stream.on('data', (chunk) => chunks.push(chunk));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    
+    const buffer = Buffer.concat(chunks);
+    const base64Image = buffer.toString('base64');
+
+    // Create form data for imgbb API
+    const formData = new FormData();
+    formData.append('image', base64Image);
+    formData.append('name', `${folder}-${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '_')}`);
+
+    // Upload to imgbb
+    const response = await axios.post(
+      `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
+      formData,
+      {
+        headers: formData.getHeaders(),
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      }
+    );
+
+    if (response.data && response.data.data && response.data.data.url) {
+      const imageUrl = response.data.data.url;
+      console.log('✅ File uploaded successfully to imgbb:', imageUrl);
+      return imageUrl;
+    } else {
+      throw new Error('Invalid response from imgbb API');
+    }
+  } catch (error) {
+    console.error('Error uploading file to imgbb:', error.message);
+    if (error.response) {
+      console.error('imgbb API error:', error.response.data);
+      throw new Error(`Failed to upload file: ${error.response.data.error?.message || error.message}`);
+    }
+    throw new Error('Failed to upload file: ' + error.message);
+  }
+}
+
+/**
+ * Get user profile by Firebase UID
+ * @param {string} uid - Firebase user ID
+ * @returns {Promise<Object|null>} User object or null if not found
+ */
 async function getUserById(uid) {
   try {
     const userDoc = await db.collection('users').doc(uid).get();

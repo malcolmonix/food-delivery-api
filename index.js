@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const { ApolloServer } = require('apollo-server-express');
+const { graphqlUploadExpress } = require('graphql-upload');
 const { typeDefs, resolvers } = require('./schema');
 const { admin } = require('./firebase');
 
@@ -26,6 +27,9 @@ async function startServer() {
   };
 
   app.use(authMiddleware);
+  
+  // File upload middleware (must be before Apollo middleware)
+  app.use(graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 }));
 
   const server = new ApolloServer({
     typeDefs,

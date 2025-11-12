@@ -20,6 +20,7 @@ console.log('- Valid credentials:', hasValidCredentials);
 
 let admin_instance = null;
 let db = null;
+let bucket = null;
 
 if (hasValidCredentials) {
   // Initialize Firebase Admin SDK with real credentials
@@ -47,7 +48,15 @@ if (hasValidCredentials) {
   
   admin_instance = admin;
   db = admin.firestore();
-  console.log('✅ Firebase initialized successfully');
+  
+  // Initialize Storage bucket
+  try {
+    bucket = admin.storage().bucket(`${serviceAccount.project_id}.appspot.com`);
+    console.log('✅ Firebase initialized successfully with Storage');
+  } catch (error) {
+    console.warn('⚠️  Firebase Storage initialization failed:', error.message);
+    console.log('✅ Firebase initialized successfully (without Storage)');
+  }
 } else {
   console.log('⚠️  Firebase credentials missing - running in mock mode');
   
@@ -73,10 +82,16 @@ if (hasValidCredentials) {
         delete: async () => ({ writeTime: new Date() })
       }),
       add: async () => ({ id: 'mock-id' }),
-      where: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+      where: () => ({ 
+        where: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+        get: async () => ({ empty: true, docs: [] }) 
+      }),
       get: async () => ({ empty: true, docs: [] })
     })
   };
+  
+  // Mock bucket for environments without storage
+  bucket = null;
 }
 
-module.exports = { admin: admin_instance, db };
+module.exports = { admin: admin_instance, db, bucket };
