@@ -27,6 +27,7 @@ function initializeDatabase() {
       id TEXT PRIMARY KEY,
       uid TEXT UNIQUE NOT NULL,
       email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
       displayName TEXT,
       phoneNumber TEXT,
       photoURL TEXT,
@@ -171,14 +172,15 @@ const dbHelpers = {
   // User operations
   createUser(userData) {
     const stmt = db.prepare(`
-      INSERT INTO users (id, uid, email, displayName, phoneNumber, photoURL, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (id, uid, email, password, displayName, phoneNumber, photoURL, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const id = userData.uid;
     stmt.run(
       id,
       userData.uid,
       userData.email,
+      userData.password,
       userData.displayName || null,
       userData.phoneNumber || null,
       userData.photoURL || null,

@@ -3,22 +3,22 @@ const express = require('express');
 const { ApolloServer } = require('apollo-server-express');
 const { graphqlUploadExpress } = require('graphql-upload');
 const { typeDefs, resolvers } = require('./schema');
-const { admin } = require('./firebase');
+const { verifyToken } = require('./auth');
 
 async function startServer() {
   const app = express();
 
-  // Authentication middleware
+  // Authentication middleware using JWT
   const authMiddleware = async (req, res, next) => {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.replace('Bearer ', '');
 
     if (token) {
       try {
-        const decodedToken = await admin.auth().verifyIdToken(token);
+        const decodedToken = verifyToken(token);
         req.user = decodedToken;
       } catch (error) {
-        console.error('Error verifying token:', error);
+        console.error('Error verifying token:', error.message);
         // Don't throw error here, just don't set user
       }
     }
@@ -44,7 +44,7 @@ async function startServer() {
 
   const PORT = process.env.PORT || 4000;
   app.listen({ port: PORT }, () =>
-    console.log(`🚀 Firebase GraphQL API server ready at http://localhost:${PORT}${server.graphqlPath}`)
+    console.log(`🚀 Food Delivery API server ready at http://localhost:${PORT}${server.graphqlPath}`)
   );
 }
 

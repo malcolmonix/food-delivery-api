@@ -1,6 +1,6 @@
 const { gql } = require('apollo-server-express');
-const { admin } = require('./firebase');
 const { dbHelpers, generateId } = require('./database');
+const { register, login, getUserById } = require('./auth');
 const axios = require('axios');
 const FormData = require('form-data');
 
@@ -471,149 +471,66 @@ const resolvers = {
     },
   },
   Mutation: {
+    /**
+     * Sign up a new user
+     */
     signUp: async (_, { email, password, displayName, phoneNumber }) => {
       try {
-        const userData = {
-          email,
-          password,
-          displayName,
-        };
-
-        // Only add phoneNumber if provided
-        if (phoneNumber) {
-          userData.phoneNumber = phoneNumber;
-        }
-
-        const userRecord = await admin.auth().createUser(userData);
-
-        // Create user profile in Firestore
-        const profileData = {
-          uid: userRecord.uid,
-          email: userRecord.email,
-          displayName: userRecord.displayName || null,
-          phoneNumber: userRecord.phoneNumber || null,
-          photoURL: userRecord.photoURL || null,
-          addresses: [],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-
-        await db.collection('users').doc(userRecord.uid).set(profileData);
-
-        // Generate custom token
-        const token = await admin.auth().createCustomToken(userRecord.uid);
-
-        return {
-          user: {
-            id: userRecord.uid,
-            ...profileData,
-          },
-          token,
-        };
+        return await register({ email, password, displayName, phoneNumber });
       } catch (error) {
         console.error('Error signing up:', error);
-        throw new Error('Failed to sign up: ' + error.message);
+        throw new Error(error.message);
       }
     },
+    /**
+     * Sign in with email and password
+     */
     signIn: async (_, { email, password }) => {
       try {
-        // Firebase Admin SDK doesn't support password sign-in directly
-        // In production, you'd use Firebase Auth REST API or client-side auth
-        // For now, we'll create a custom token for the user
-        const userRecord = await admin.auth().getUserByEmail(email);
-        const token = await admin.auth().createCustomToken(userRecord.uid);
-
-        const user = await getUserById(userRecord.uid);
-
-        return {
-          user,
-          token,
-        };
+        return await login(email, password);
       } catch (error) {
         console.error('Error signing in:', error);
-        throw new Error('Failed to sign in: ' + error.message);
+        throw new Error(error.message);
       }
     },
+    /**
+     * Sign in with Google (simplified - returns auth token)
+     */
     signInWithGoogle: async (_, { idToken }) => {
-      try {
-        const decodedToken = await admin.auth().verifyIdToken(idToken);
-        const uid = decodedToken.uid;
-
-        // Ensure user profile exists
-        let user = await getUserById(uid);
-        if (!user) {
-          const userRecord = await admin.auth().getUser(uid);
-          const userData = {
-            uid: userRecord.uid,
-            email: userRecord.email,
-            displayName: userRecord.displayName || null,
-            phoneNumber: userRecord.phoneNumber || null,
-            photoURL: userRecord.photoURL || null,
-            addresses: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          };
-          await db.collection('users').doc(uid).set(userData);
-          user = {
-            id: uid,
-            ...userData,
-          };
-        }
-
-        const token = await admin.auth().createCustomToken(uid);
-
-        return {
-          user,
-          token,
-        };
-      } catch (error) {
-        console.error('Error signing in with Google:', error);
-        throw new Error('Failed to sign in with Google: ' + error.message);
-      }
+      // For now, this is a placeholder. In production, you'd verify the Google token
+      // and create/login the user accordingly
+      throw new Error('Google sign-in not yet implemented. Please use email/password authentication.');
     },
+    /**
+     * Sign in with phone number (simplified)
+     */
     signInWithPhone: async (_, { phoneNumber, verificationId, code }) => {
-      try {
-        // This is a simplified implementation
-        // In production, you'd verify the code with Firebase Auth
-        const userRecord = await admin.auth().getUserByPhoneNumber(phoneNumber);
-        const token = await admin.auth().createCustomToken(userRecord.uid);
-
-        const user = await getUserById(userRecord.uid);
-
-        return {
-          user,
-          token,
-        };
-      } catch (error) {
-        console.error('Error signing in with phone:', error);
-        throw new Error('Failed to sign in with phone: ' + error.message);
-      }
+      // For now, this is a placeholder
+      throw new Error('Phone sign-in not yet implemented. Please use email/password authentication.');
     },
+    /**
+     * Update user profile
+     */
     updateProfile: async (_, { displayName, phoneNumber, photoURL }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        const updateData = {};
+        const updateData = { updatedAt: new Date().toISOString() };
         if (displayName !== undefined) updateData.displayName = displayName;
         if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
         if (photoURL !== undefined) updateData.photoURL = photoURL;
-        updateData.updatedAt = new Date().toISOString();
 
-        await db.collection('users').doc(user.uid).update(updateData);
+        dbHelpers.updateUser(user.uid, updateData);
 
-        // Update Firebase Auth profile
-        await admin.auth().updateUser(user.uid, {
-          displayName,
-          phoneNumber,
-          photoURL,
-        });
-
-        return await getUserById(user.uid);
+        return getUserById(user.uid);
       } catch (error) {
         console.error('Error updating profile:', error);
         throw new Error('Failed to update profile: ' + error.message);
       }
     },
+    /**
+     * Add a new address
+     */
     addAddress: async (_, { label, street, city, state, zipCode, country, isDefault }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
@@ -631,24 +548,14 @@ const resolvers = {
           updatedAt: new Date().toISOString(),
         };
 
-        // If this is the default address, unset other defaults
         if (isDefault) {
-          const addressesSnapshot = await db.collection('addresses')
-            .where('userId', '==', user.uid)
-            .where('isDefault', '==', true)
-            .get();
-
-          const batch = db.batch();
-          addressesSnapshot.docs.forEach(doc => {
-            batch.update(doc.ref, { isDefault: false, updatedAt: new Date().toISOString() });
-          });
-          await batch.commit();
+          dbHelpers.unsetDefaultAddresses(user.uid);
         }
 
-        const docRef = await db.collection('addresses').add(addressData);
+        const id = dbHelpers.createAddress(addressData);
 
         return {
-          id: docRef.id,
+          id,
           ...addressData,
         };
       } catch (error) {
@@ -656,17 +563,16 @@ const resolvers = {
         throw new Error('Failed to add address: ' + error.message);
       }
     },
+    /**
+     * Update an existing address
+     */
     updateAddress: async (_, { id, label, street, city, state, zipCode, country, isDefault }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        const addressRef = db.collection('addresses').doc(id);
-        const addressDoc = await addressRef.get();
-
-        if (!addressDoc.exists) throw new Error('Address not found');
-
-        const addressData = addressDoc.data();
-        if (addressData.userId !== user.uid) throw new Error('Access denied');
+        const address = dbHelpers.getAddressById(id);
+        if (!address) throw new Error('Address not found');
+        if (address.userId !== user.uid) throw new Error('Access denied');
 
         const updateData = { updatedAt: new Date().toISOString() };
         if (label !== undefined) updateData.label = label;
@@ -677,53 +583,43 @@ const resolvers = {
         if (country !== undefined) updateData.country = country;
         if (isDefault !== undefined) updateData.isDefault = isDefault;
 
-        // If setting as default, unset other defaults
         if (isDefault) {
-          const addressesSnapshot = await db.collection('addresses')
-            .where('userId', '==', user.uid)
-            .where('isDefault', '==', true)
-            .get();
-
-          const batch = db.batch();
-          addressesSnapshot.docs.forEach(doc => {
-            if (doc.id !== id) {
-              batch.update(doc.ref, { isDefault: false, updatedAt: new Date().toISOString() });
-            }
-          });
-          await batch.commit();
+          dbHelpers.unsetDefaultAddresses(user.uid);
         }
 
-        await addressRef.update(updateData);
+        dbHelpers.updateAddress(id, updateData);
 
-        const updatedDoc = await addressRef.get();
+        const updatedAddress = dbHelpers.getAddressById(id);
         return {
-          id: updatedDoc.id,
-          ...updatedDoc.data(),
+          ...updatedAddress,
+          isDefault: Boolean(updatedAddress.isDefault),
         };
       } catch (error) {
         console.error('Error updating address:', error);
         throw new Error('Failed to update address: ' + error.message);
       }
     },
+    /**
+     * Delete an address
+     */
     deleteAddress: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        const addressRef = db.collection('addresses').doc(id);
-        const addressDoc = await addressRef.get();
+        const address = dbHelpers.getAddressById(id);
+        if (!address) throw new Error('Address not found');
+        if (address.userId !== user.uid) throw new Error('Access denied');
 
-        if (!addressDoc.exists) throw new Error('Address not found');
-
-        const addressData = addressDoc.data();
-        if (addressData.userId !== user.uid) throw new Error('Access denied');
-
-        await addressRef.delete();
+        dbHelpers.deleteAddress(id);
         return true;
       } catch (error) {
         console.error('Error deleting address:', error);
         throw new Error('Failed to delete address: ' + error.message);
       }
     },
+    /**
+     * Place a new order
+     */
     placeOrder: async (_, {
       restaurant,
       orderInput,
@@ -784,13 +680,13 @@ const resolvers = {
           updatedAt: new Date().toISOString(),
         };
 
-        // Save to Firebase
-        console.log('Attempting to save order to Firebase...');
-        const docRef = await db.collection('orders').add(orderData);
-        console.log('Order saved successfully with ID:', docRef.id);
+        // Save to SQLite
+        console.log('Attempting to save order to database...');
+        const id = dbHelpers.createOrder(orderData);
+        console.log('Order saved successfully with ID:', id);
 
         return {
-          id: docRef.id,
+          id,
           ...orderData,
         };
       } catch (error) {
@@ -800,6 +696,9 @@ const resolvers = {
         throw new Error('Failed to place order: ' + error.message);
       }
     },
+    /**
+     * Update order status
+     */
     updateOrderStatus: async (_, { orderId, status, note }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
@@ -815,16 +714,13 @@ const resolvers = {
         }
 
         // Get current order
-        const orderRef = db.collection('orders').doc(orderId);
-        const orderDoc = await orderRef.get();
+        const currentOrder = dbHelpers.getOrderById(orderId);
 
-        if (!orderDoc.exists) {
+        if (!currentOrder) {
           throw new Error('Order not found');
         }
 
-        const currentOrder = orderDoc.data();
-
-        // Check if order belongs to user (or if user is admin - for now, only allow order owner)
+        // Check if order belongs to user
         if (currentOrder.userId !== user.uid) {
           throw new Error('Access denied: Can only update your own orders');
         }
@@ -847,9 +743,10 @@ const resolvers = {
           note: note || `Status updated to ${status}`
         };
 
-        const updatedStatusHistory = [...(currentOrder.statusHistory || []), statusUpdate];
+        const statusHistory = JSON.parse(currentOrder.statusHistory);
+        const updatedStatusHistory = [...statusHistory, statusUpdate];
 
-        await orderRef.update({
+        dbHelpers.updateOrder(orderId, {
           orderStatus: status,
           statusHistory: updatedStatusHistory,
           updatedAt: new Date().toISOString(),
@@ -858,16 +755,21 @@ const resolvers = {
         console.log(`Order ${orderId} status updated: ${currentStatus} → ${status}`);
 
         // Return updated order
-        const updatedDoc = await orderRef.get();
+        const updatedOrder = dbHelpers.getOrderById(orderId);
         return {
-          id: updatedDoc.id,
-          ...updatedDoc.data(),
+          ...updatedOrder,
+          orderItems: JSON.parse(updatedOrder.orderItems),
+          statusHistory: JSON.parse(updatedOrder.statusHistory),
+          isPickedUp: Boolean(updatedOrder.isPickedUp),
         };
       } catch (error) {
         console.error('Error updating order status:', error);
         throw new Error('Failed to update order status: ' + error.message);
       }
     },
+    /**
+     * Create a new restaurant
+     */
     createRestaurant: async (_, { name, description, contactEmail, phoneNumber, address, cuisine, priceRange, openingHours }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
@@ -884,7 +786,58 @@ const resolvers = {
           isActive: true,
           rating: null,
           reviewCount: 0,
-          ownerId: user.uid, // Track who owns this restaurant
+          ownerId: user.uid,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        const id = dbHelpers.createRestaurant(restaurantData);
+
+        return {
+          id,
+          ...restaurantData,
+        };
+      } catch (error) {
+        console.error('Error creating restaurant:', error);
+        throw new Error('Failed to create restaurant: ' + error.message);
+      }
+    },
+    /**
+     * Update a restaurant
+     */
+    updateRestaurant: async (_, { id, name, description, contactEmail, phoneNumber, address, cuisine, priceRange, openingHours, isActive }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        const restaurant = dbHelpers.getRestaurantById(id);
+        if (!restaurant) throw new Error('Restaurant not found');
+        if (restaurant.ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
+
+        const updateData = { updatedAt: new Date().toISOString() };
+        if (name !== undefined) updateData.name = name;
+        if (description !== undefined) updateData.description = description;
+        if (contactEmail !== undefined) updateData.contactEmail = contactEmail;
+        if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
+        if (address !== undefined) updateData.address = address;
+        if (cuisine !== undefined) updateData.cuisine = cuisine;
+        if (priceRange !== undefined) updateData.priceRange = priceRange;
+        if (openingHours !== undefined) updateData.openingHours = openingHours;
+        if (isActive !== undefined) updateData.isActive = isActive;
+
+        dbHelpers.updateRestaurant(id, updateData);
+
+        const updatedRestaurant = dbHelpers.getRestaurantById(id);
+        return {
+          ...updatedRestaurant,
+          cuisine: JSON.parse(updatedRestaurant.cuisine || '[]'),
+          openingHours: JSON.parse(updatedRestaurant.openingHours || '[]'),
+          isActive: Boolean(updatedRestaurant.isActive),
+        };
+      } catch (error) {
+        console.error('Error updating restaurant:', error);
+        throw new Error('Failed to update restaurant: ' + error.message);
+      }
+    },
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
