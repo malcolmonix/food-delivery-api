@@ -1,6 +1,6 @@
 const { gql } = require('apollo-server-express');
 const { dbHelpers, generateId } = require('./database');
-const { register, login, getUserById } = require('./auth');
+const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
 
@@ -472,44 +472,133 @@ const resolvers = {
   },
   Mutation: {
     /**
-     * Sign up a new user
+     * Sign up a new user with Firebase Auth and store profile in SQLite
      */
     signUp: async (_, { email, password, displayName, phoneNumber }) => {
       try {
-        return await register({ email, password, displayName, phoneNumber });
+        const userData = {
+          email,
+          password,
+          displayName,
+        };
+
+        if (phoneNumber) {
+          userData.phoneNumber = phoneNumber;
+        }
+
+        // Create user in Firebase Auth
+        const userRecord = await admin.auth().createUser(userData);
+
+        // Store user profile in SQLite (not Firebase password field)
+        const profileData = {
+          uid: userRecord.uid,
+          email: userRecord.email,
+          password: '', // Don't store password in SQLite, Firebase handles it
+          displayName: userRecord.displayName || null,
+          phoneNumber: userRecord.phoneNumber || null,
+          photoURL: userRecord.photoURL || null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        dbHelpers.createUser(profileData);
+
+        // Generate Firebase custom token
+        const token = await admin.auth().createCustomToken(userRecord.uid);
+
+        return {
+          user: {
+            id: userRecord.uid,
+            uid: userRecord.uid,
+            email: userRecord.email,
+            displayName: userRecord.displayName || null,
+            phoneNumber: userRecord.phoneNumber || null,
+            photoURL: userRecord.photoURL || null,
+            addresses: [],
+            createdAt: profileData.createdAt,
+            updatedAt: profileData.updatedAt,
+          },
+          token,
+        };
       } catch (error) {
         console.error('Error signing up:', error);
-        throw new Error(error.message);
+        throw new Error('Failed to sign up: ' + error.message);
       }
     },
     /**
-     * Sign in with email and password
+     * Sign in with Firebase Auth
      */
     signIn: async (_, { email, password }) => {
       try {
-        return await login(email, password);
+        // Get user from Firebase Auth by email
+        const userRecord = await admin.auth().getUserByEmail(email);
+        
+        // Generate custom token
+        const token = await admin.auth().createCustomToken(userRecord.uid);
+        
+        // Get user profile from SQLite
+        const user = await getUserById(userRecord.uid);
+
+        return { user, token };
       } catch (error) {
         console.error('Error signing in:', error);
-        throw new Error(error.message);
+        throw new Error('Failed to sign in: ' + error.message);
       }
     },
     /**
-     * Sign in with Google (simplified - returns auth token)
+     * Sign in with Google using Firebase Auth
      */
     signInWithGoogle: async (_, { idToken }) => {
-      // For now, this is a placeholder. In production, you'd verify the Google token
-      // and create/login the user accordingly
-      throw new Error('Google sign-in not yet implemented. Please use email/password authentication.');
+      try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        const uid = decodedToken.uid;
+
+        // Check if user profile exists in SQLite
+        let user = await getUserById(uid);
+        if (!user) {
+          // Get user from Firebase Auth
+          const userRecord = await admin.auth().getUser(uid);
+          
+          // Create profile in SQLite
+          const userData = {
+            uid: userRecord.uid,
+            email: userRecord.email,
+            password: '', // Firebase handles authentication
+            displayName: userRecord.displayName || null,
+            phoneNumber: userRecord.phoneNumber || null,
+            photoURL: userRecord.photoURL || null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          
+          dbHelpers.createUser(userData);
+          user = await getUserById(uid);
+        }
+
+        const token = await admin.auth().createCustomToken(uid);
+        return { user, token };
+      } catch (error) {
+        console.error('Error signing in with Google:', error);
+        throw new Error('Failed to sign in with Google: ' + error.message);
+      }
     },
     /**
-     * Sign in with phone number (simplified)
+     * Sign in with phone number using Firebase Auth
      */
     signInWithPhone: async (_, { phoneNumber, verificationId, code }) => {
-      // For now, this is a placeholder
-      throw new Error('Phone sign-in not yet implemented. Please use email/password authentication.');
+      try {
+        const userRecord = await admin.auth().getUserByPhoneNumber(phoneNumber);
+        const token = await admin.auth().createCustomToken(userRecord.uid);
+        const user = await getUserById(userRecord.uid);
+
+        return { user, token };
+      } catch (error) {
+        console.error('Error signing in with phone:', error);
+        throw new Error('Failed to sign in with phone: ' + error.message);
+      }
     },
     /**
-     * Update user profile
+     * Update user profile in both Firebase Auth and SQLite
      */
     updateProfile: async (_, { displayName, phoneNumber, photoURL }, { user }) => {
       if (!user) throw new Error('Authentication required');
@@ -520,9 +609,18 @@ const resolvers = {
         if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
         if (photoURL !== undefined) updateData.photoURL = photoURL;
 
+        // Update in SQLite
         dbHelpers.updateUser(user.uid, updateData);
 
-        return getUserById(user.uid);
+        // Update in Firebase Auth
+        const authUpdateData = {};
+        if (displayName !== undefined) authUpdateData.displayName = displayName;
+        if (phoneNumber !== undefined) authUpdateData.phoneNumber = phoneNumber;
+        if (photoURL !== undefined) authUpdateData.photoURL = photoURL;
+        
+        await admin.auth().updateUser(user.uid, authUpdateData);
+
+        return await getUserById(user.uid);
       } catch (error) {
         console.error('Error updating profile:', error);
         throw new Error('Failed to update profile: ' + error.message);
@@ -838,73 +936,20 @@ const resolvers = {
         throw new Error('Failed to update restaurant: ' + error.message);
       }
     },
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-
-        const docRef = await db.collection('eateries').add(restaurantData);
-
-        return {
-          id: docRef.id,
-          ...restaurantData,
-        };
-      } catch (error) {
-        console.error('Error creating restaurant:', error);
-        throw new Error('Failed to create restaurant: ' + error.message);
-      }
-    },
-    updateRestaurant: async (_, { id, name, description, contactEmail, phoneNumber, address, cuisine, priceRange, openingHours, isActive }, { user }) => {
-      if (!user) throw new Error('Authentication required');
-
-      try {
-        const restaurantRef = db.collection('eateries').doc(id);
-        const restaurantDoc = await restaurantRef.get();
-
-        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
-
-        const restaurantData = restaurantDoc.data();
-        if (restaurantData.ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
-
-        const updateData = { updatedAt: new Date().toISOString() };
-        if (name !== undefined) updateData.name = name;
-        if (description !== undefined) updateData.description = description;
-        if (contactEmail !== undefined) updateData.contactEmail = contactEmail;
-        if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
-        if (address !== undefined) updateData.address = address;
-        if (cuisine !== undefined) updateData.cuisine = cuisine;
-        if (priceRange !== undefined) updateData.priceRange = priceRange;
-        if (openingHours !== undefined) updateData.openingHours = openingHours;
-        if (isActive !== undefined) updateData.isActive = isActive;
-
-        await restaurantRef.update(updateData);
-
-        const updatedDoc = await restaurantRef.get();
-        const updatedData = updatedDoc.data();
-
-        return {
-          id: updatedDoc.id,
-          ...updatedData,
-          cuisine: updatedData.cuisine || [],
-          openingHours: updatedData.openingHours || [],
-          isActive: updatedData.isActive !== false,
-          rating: updatedData.rating || null,
-          reviewCount: updatedData.reviewCount || 0,
-        };
-      } catch (error) {
-        console.error('Error updating restaurant:', error);
-        throw new Error('Failed to update restaurant: ' + error.message);
-      }
-    },
+    /**
+     * Create a new menu item
+     */
     createMenuItem: async (_, { restaurantId, name, description, price, category, imageUrl, imageHint, isAvailable, isVegetarian, isVegan, allergens }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
         // Verify restaurant ownership
-        const restaurantDoc = await db.collection('eateries').doc(restaurantId).get();
-        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
-        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only manage menu for your own restaurants');
+        const restaurant = dbHelpers.getRestaurantById(restaurantId);
+        if (!restaurant) throw new Error('Restaurant not found');
+        if (restaurant.ownerId !== user.uid) throw new Error('Access denied: Can only manage menu for your own restaurants');
 
         const menuItemData = {
+          restaurantId,
           name,
           description: description || '',
           price: parseFloat(price),
@@ -919,11 +964,10 @@ const resolvers = {
           updatedAt: new Date().toISOString(),
         };
 
-        const docRef = await db.collection('eateries').doc(restaurantId).collection('menu_items').add(menuItemData);
+        const id = dbHelpers.createMenuItem(menuItemData);
 
         return {
-          id: docRef.id,
-          restaurantId,
+          id,
           ...menuItemData,
         };
       } catch (error) {
@@ -931,25 +975,22 @@ const resolvers = {
         throw new Error('Failed to create menu item: ' + error.message);
       }
     },
+    /**
+     * Update a menu item
+     */
     updateMenuItem: async (_, { id, name, description, price, category, imageUrl, imageHint, isAvailable, isVegetarian, isVegan, allergens }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        // Find the restaurant that contains this menu item
-        const eateriesSnapshot = await db.collection('eateries').where('ownerId', '==', user.uid).get();
-        let menuItemRef = null;
-        let restaurantId = null;
+        // Get menu item
+        const menuItem = dbHelpers.getMenuItemById(id);
+        if (!menuItem) throw new Error('Menu item not found');
 
-        for (const eateryDoc of eateriesSnapshot.docs) {
-          const itemDoc = await eateryDoc.ref.collection('menu_items').doc(id).get();
-          if (itemDoc.exists) {
-            menuItemRef = itemDoc.ref;
-            restaurantId = eateryDoc.id;
-            break;
-          }
+        // Verify restaurant ownership
+        const restaurant = dbHelpers.getRestaurantById(menuItem.restaurantId);
+        if (!restaurant || restaurant.ownerId !== user.uid) {
+          throw new Error('Access denied: Can only manage menu for your own restaurants');
         }
-
-        if (!menuItemRef) throw new Error('Menu item not found or access denied');
 
         const updateData = { updatedAt: new Date().toISOString() };
         if (name !== undefined) updateData.name = name;
@@ -963,56 +1004,59 @@ const resolvers = {
         if (isVegan !== undefined) updateData.isVegan = isVegan;
         if (allergens !== undefined) updateData.allergens = allergens;
 
-        await menuItemRef.update(updateData);
+        dbHelpers.updateMenuItem(id, updateData);
 
-        const updatedDoc = await menuItemRef.get();
-        const updatedData = updatedDoc.data();
-
+        const updatedMenuItem = dbHelpers.getMenuItemById(id);
         return {
-          id: updatedDoc.id,
-          restaurantId,
-          ...updatedData,
-          isAvailable: updatedData.isAvailable !== false,
-          isVegetarian: updatedData.isVegetarian || false,
-          isVegan: updatedData.isVegan || false,
-          allergens: updatedData.allergens || [],
+          ...updatedMenuItem,
+          allergens: JSON.parse(updatedMenuItem.allergens || '[]'),
+          isAvailable: Boolean(updatedMenuItem.isAvailable),
+          isVegetarian: Boolean(updatedMenuItem.isVegetarian),
+          isVegan: Boolean(updatedMenuItem.isVegan),
         };
       } catch (error) {
         console.error('Error updating menu item:', error);
         throw new Error('Failed to update menu item: ' + error.message);
       }
     },
+    /**
+     * Delete a menu item
+     */
     deleteMenuItem: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        // Find and delete the menu item from owner's restaurants
-        const eateriesSnapshot = await db.collection('eateries').where('ownerId', '==', user.uid).get();
+        // Get menu item
+        const menuItem = dbHelpers.getMenuItemById(id);
+        if (!menuItem) throw new Error('Menu item not found');
 
-        for (const eateryDoc of eateriesSnapshot.docs) {
-          const itemDoc = await eateryDoc.ref.collection('menu_items').doc(id).get();
-          if (itemDoc.exists) {
-            await itemDoc.ref.delete();
-            return true;
-          }
+        // Verify restaurant ownership
+        const restaurant = dbHelpers.getRestaurantById(menuItem.restaurantId);
+        if (!restaurant || restaurant.ownerId !== user.uid) {
+          throw new Error('Access denied: Can only manage menu for your own restaurants');
         }
 
-        throw new Error('Menu item not found or access denied');
+        dbHelpers.deleteMenuItem(id);
+        return true;
       } catch (error) {
         console.error('Error deleting menu item:', error);
         throw new Error('Failed to delete menu item: ' + error.message);
       }
     },
+    /**
+     * Create a new menu category
+     */
     createMenuCategory: async (_, { restaurantId, name, description, displayOrder }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
         // Verify restaurant ownership
-        const restaurantDoc = await db.collection('eateries').doc(restaurantId).get();
-        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
-        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only manage categories for your own restaurants');
+        const restaurant = dbHelpers.getRestaurantById(restaurantId);
+        if (!restaurant) throw new Error('Restaurant not found');
+        if (restaurant.ownerId !== user.uid) throw new Error('Access denied: Can only manage categories for your own restaurants');
 
         const categoryData = {
+          restaurantId,
           name,
           description: description || '',
           displayOrder: displayOrder || 0,
@@ -1020,11 +1064,10 @@ const resolvers = {
           updatedAt: new Date().toISOString(),
         };
 
-        const docRef = await db.collection('eateries').doc(restaurantId).collection('menu_categories').add(categoryData);
+        const id = dbHelpers.createMenuCategory(categoryData);
 
         return {
-          id: docRef.id,
-          restaurantId,
+          id,
           ...categoryData,
         };
       } catch (error) {
@@ -1032,70 +1075,66 @@ const resolvers = {
         throw new Error('Failed to create menu category: ' + error.message);
       }
     },
+    /**
+     * Update a menu category
+     */
     updateMenuCategory: async (_, { id, name, description, displayOrder }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        // Find the restaurant that contains this category
-        const eateriesSnapshot = await db.collection('eateries').where('ownerId', '==', user.uid).get();
-        let categoryRef = null;
-        let restaurantId = null;
+        // Get category
+        const category = dbHelpers.getMenuCategoryById(id);
+        if (!category) throw new Error('Menu category not found');
 
-        for (const eateryDoc of eateriesSnapshot.docs) {
-          const categoryDoc = await eateryDoc.ref.collection('menu_categories').doc(id).get();
-          if (categoryDoc.exists) {
-            categoryRef = categoryDoc.ref;
-            restaurantId = eateryDoc.id;
-            break;
-          }
+        // Verify restaurant ownership
+        const restaurant = dbHelpers.getRestaurantById(category.restaurantId);
+        if (!restaurant || restaurant.ownerId !== user.uid) {
+          throw new Error('Access denied: Can only manage categories for your own restaurants');
         }
-
-        if (!categoryRef) throw new Error('Menu category not found or access denied');
 
         const updateData = { updatedAt: new Date().toISOString() };
         if (name !== undefined) updateData.name = name;
         if (description !== undefined) updateData.description = description;
         if (displayOrder !== undefined) updateData.displayOrder = displayOrder;
 
-        await categoryRef.update(updateData);
+        dbHelpers.updateMenuCategory(id, updateData);
 
-        const updatedDoc = await categoryRef.get();
-        const updatedData = updatedDoc.data();
-
+        const updatedCategory = dbHelpers.getMenuCategoryById(id);
         return {
-          id: updatedDoc.id,
-          restaurantId,
-          ...updatedData,
-          displayOrder: updatedData.displayOrder || 0,
+          ...updatedCategory,
+          restaurantId: category.restaurantId,
         };
       } catch (error) {
         console.error('Error updating menu category:', error);
         throw new Error('Failed to update menu category: ' + error.message);
       }
     },
+    /**
+     * Delete a menu category
+     */
     deleteMenuCategory: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        // Find and delete the category from owner's restaurants
-        const eateriesSnapshot = await db.collection('eateries').where('ownerId', '==', user.uid).get();
+        // Get category
+        const category = dbHelpers.getMenuCategoryById(id);
+        if (!category) throw new Error('Menu category not found');
 
-        for (const eateryDoc of eateriesSnapshot.docs) {
-          const categoryDoc = await eateryDoc.ref.collection('menu_categories').doc(id).get();
-          if (categoryDoc.exists) {
-            await categoryDoc.ref.delete();
-            return true;
-          }
+        // Verify restaurant ownership
+        const restaurant = dbHelpers.getRestaurantById(category.restaurantId);
+        if (!restaurant || restaurant.ownerId !== user.uid) {
+          throw new Error('Access denied: Can only manage categories for your own restaurants');
         }
 
-        throw new Error('Menu category not found or access denied');
+        dbHelpers.deleteMenuCategory(id);
+        return true;
       } catch (error) {
         console.error('Error deleting menu category:', error);
         throw new Error('Failed to delete menu category: ' + error.message);
       }
     },
     /**
-     * Upload an image to Firebase Storage
+     * Upload an image to imgbb
      * @param {Upload} file - File to upload
      * @param {string} folder - Optional folder path (defaults to 'images')
      * @returns {Promise<string>} Public URL of uploaded image
@@ -1122,32 +1161,25 @@ const resolvers = {
 
       try {
         // Verify restaurant ownership
-        const restaurantRef = db.collection('eateries').doc(restaurantId);
-        const restaurantDoc = await restaurantRef.get();
-
-        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
-        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
+        const restaurant = dbHelpers.getRestaurantById(restaurantId);
+        if (!restaurant) throw new Error('Restaurant not found');
+        if (restaurant.ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
 
         // Upload logo
-        const logoUrl = await uploadFileToStorage(file, `restaurants/${restaurantId}/logo`);
+        const logoUrl = await uploadFileToStorage(file, `restaurants-${restaurantId}-logo`);
 
         // Update restaurant
-        await restaurantRef.update({
+        dbHelpers.updateRestaurant(restaurantId, {
           logoUrl,
           updatedAt: new Date().toISOString(),
         });
 
-        const updatedDoc = await restaurantRef.get();
-        const updatedData = updatedDoc.data();
-
+        const updatedRestaurant = dbHelpers.getRestaurantById(restaurantId);
         return {
-          id: updatedDoc.id,
-          ...updatedData,
-          cuisine: updatedData.cuisine || [],
-          openingHours: updatedData.openingHours || [],
-          isActive: updatedData.isActive !== false,
-          rating: updatedData.rating || null,
-          reviewCount: updatedData.reviewCount || 0,
+          ...updatedRestaurant,
+          cuisine: JSON.parse(updatedRestaurant.cuisine || '[]'),
+          openingHours: JSON.parse(updatedRestaurant.openingHours || '[]'),
+          isActive: Boolean(updatedRestaurant.isActive),
         };
       } catch (error) {
         console.error('Error uploading restaurant logo:', error);
@@ -1165,32 +1197,25 @@ const resolvers = {
 
       try {
         // Verify restaurant ownership
-        const restaurantRef = db.collection('eateries').doc(restaurantId);
-        const restaurantDoc = await restaurantRef.get();
-
-        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
-        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
+        const restaurant = dbHelpers.getRestaurantById(restaurantId);
+        if (!restaurant) throw new Error('Restaurant not found');
+        if (restaurant.ownerId !== user.uid) throw new Error('Access denied: Can only update your own restaurants');
 
         // Upload banner
-        const bannerUrl = await uploadFileToStorage(file, `restaurants/${restaurantId}/banner`);
+        const bannerUrl = await uploadFileToStorage(file, `restaurants-${restaurantId}-banner`);
 
         // Update restaurant
-        await restaurantRef.update({
+        dbHelpers.updateRestaurant(restaurantId, {
           bannerUrl,
           updatedAt: new Date().toISOString(),
         });
 
-        const updatedDoc = await restaurantRef.get();
-        const updatedData = updatedDoc.data();
-
+        const updatedRestaurant = dbHelpers.getRestaurantById(restaurantId);
         return {
-          id: updatedDoc.id,
-          ...updatedData,
-          cuisine: updatedData.cuisine || [],
-          openingHours: updatedData.openingHours || [],
-          isActive: updatedData.isActive !== false,
-          rating: updatedData.rating || null,
-          reviewCount: updatedData.reviewCount || 0,
+          ...updatedRestaurant,
+          cuisine: JSON.parse(updatedRestaurant.cuisine || '[]'),
+          openingHours: JSON.parse(updatedRestaurant.openingHours || '[]'),
+          isActive: Boolean(updatedRestaurant.isActive),
         };
       } catch (error) {
         console.error('Error uploading restaurant banner:', error);
@@ -1209,35 +1234,32 @@ const resolvers = {
 
       try {
         // Verify restaurant ownership
-        const restaurantDoc = await db.collection('eateries').doc(restaurantId).get();
-        if (!restaurantDoc.exists) throw new Error('Restaurant not found');
-        if (restaurantDoc.data().ownerId !== user.uid) throw new Error('Access denied: Can only manage menu for your own restaurants');
+        const restaurant = dbHelpers.getRestaurantById(restaurantId);
+        if (!restaurant) throw new Error('Restaurant not found');
+        if (restaurant.ownerId !== user.uid) throw new Error('Access denied: Can only manage menu for your own restaurants');
 
         // Get menu item
-        const menuItemRef = restaurantDoc.ref.collection('menu_items').doc(menuItemId);
-        const menuItemDoc = await menuItemRef.get();
-        if (!menuItemDoc.exists) throw new Error('Menu item not found');
+        const menuItem = dbHelpers.getMenuItemById(menuItemId);
+        if (!menuItem || menuItem.restaurantId !== restaurantId) {
+          throw new Error('Menu item not found');
+        }
 
         // Upload image
-        const imageUrl = await uploadFileToStorage(file, `restaurants/${restaurantId}/menu-items`);
+        const imageUrl = await uploadFileToStorage(file, `menu-items-${menuItemId}`);
 
         // Update menu item
-        await menuItemRef.update({
+        dbHelpers.updateMenuItem(menuItemId, {
           imageUrl,
           updatedAt: new Date().toISOString(),
         });
 
-        const updatedDoc = await menuItemRef.get();
-        const updatedData = updatedDoc.data();
-
+        const updatedMenuItem = dbHelpers.getMenuItemById(menuItemId);
         return {
-          id: updatedDoc.id,
-          restaurantId,
-          ...updatedData,
-          isAvailable: updatedData.isAvailable !== false,
-          isVegetarian: updatedData.isVegetarian || false,
-          isVegan: updatedData.isVegan || false,
-          allergens: updatedData.allergens || [],
+          ...updatedMenuItem,
+          allergens: JSON.parse(updatedMenuItem.allergens || '[]'),
+          isAvailable: Boolean(updatedMenuItem.isAvailable),
+          isVegetarian: Boolean(updatedMenuItem.isVegetarian),
+          isVegan: Boolean(updatedMenuItem.isVegan),
         };
       } catch (error) {
         console.error('Error uploading menu item image:', error);
@@ -1312,32 +1334,30 @@ async function uploadFileToStorage(file, folder = 'images') {
 }
 
 /**
- * Get user profile by Firebase UID
+ * Get user profile by Firebase UID from SQLite
  * @param {string} uid - Firebase user ID
  * @returns {Promise<Object|null>} User object or null if not found
  */
 async function getUserById(uid) {
   try {
-    const userDoc = await db.collection('users').doc(uid).get();
-    if (!userDoc.exists) return null;
+    const user = dbHelpers.getUserByUid(uid);
+    if (!user) return null;
 
-    const userData = userDoc.data();
-    const addressesSnapshot = await db.collection('addresses').where('userId', '==', uid).get();
-    const addresses = addressesSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+    const addresses = dbHelpers.getAddressesByUserId(uid);
 
     return {
       id: uid,
       uid,
-      email: userData.email,
-      displayName: userData.displayName,
-      phoneNumber: userData.phoneNumber,
-      photoURL: userData.photoURL,
-      addresses,
-      createdAt: userData.createdAt,
-      updatedAt: userData.updatedAt,
+      email: user.email,
+      displayName: user.displayName,
+      phoneNumber: user.phoneNumber,
+      photoURL: user.photoURL,
+      addresses: addresses.map(addr => ({
+        ...addr,
+        isDefault: Boolean(addr.isDefault),
+      })),
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
     };
   } catch (error) {
     console.error('Error getting user by ID:', error);
