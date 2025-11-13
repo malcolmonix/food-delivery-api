@@ -4,6 +4,7 @@ const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
 const DELIVERMI_URL = process.env.DELIVERMI_URL || 'http://localhost:9010';
+const { schedule, cancel } = require('./notifyScheduler');
 
 const typeDefs = gql`
   scalar Upload
@@ -151,6 +152,8 @@ const typeDefs = gql`
     menuCategories(restaurantId: ID!): [MenuCategory!]!
     # Orders available for riders to accept
     availableOrders: [Order!]!
+    # Rider-specific order view
+    riderOrder(id: ID!): Order
   }
 
   type Mutation {
@@ -274,6 +277,8 @@ const typeDefs = gql`
     # Rider workflows
     assignRider(orderId: ID!): Order!
     riderUpdateOrderStatus(orderId: ID!, status: String!, code: String): Order!
+    riderReportNotReady(orderId: ID!, waitedMinutes: Int): Boolean!
+    riderCancelOrder(orderId: ID!, reason: String): Boolean!
   }
 
   input OpeningHourInput {
@@ -494,6 +499,27 @@ const resolvers = {
       } catch (error) {
         console.error('Error fetching available orders:', error);
         throw new Error('Failed to fetch available orders');
+      }
+    },
+    /**
+     * Rider-specific single order view (only accessible to assigned rider)
+     */
+    riderOrder: async (_, { id }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      try {
+        const order = dbHelpers.getOrderById(id);
+        if (!order) return null;
+        if (order.riderId !== user.uid) throw new Error('Access denied');
+        return {
+          ...order,
+          orderItems: JSON.parse(order.orderItems),
+          statusHistory: JSON.parse(order.statusHistory),
+          isPickedUp: Boolean(order.isPickedUp),
+          paymentProcessed: Boolean(order.paymentProcessed),
+        };
+      } catch (e) {
+        console.error('riderOrder error', e.message || e);
+        throw new Error('Failed to fetch order');
       }
     },
   },
@@ -1005,6 +1031,39 @@ const resolvers = {
           console.warn('Error sending notifications:', notifyErr.message || notifyErr);
         }
 
+        // Schedule a reminder to the assigned driver ~7 minutes before expected pickup time
+        try {
+          const updated = dbHelpers.getOrderById(orderId);
+          if (updated && updated.riderId && updated.expectedTime) {
+            const sendAt = new Date(updated.expectedTime).getTime() - 7 * 60 * 1000; // 7 minutes before
+            const notifyId = `order-reminder-${updated.id}`;
+
+            const sendReminder = async () => {
+              try {
+                const riderSnap = await admin.firestore().collection('riders').doc(updated.riderId).get().catch(() => null);
+                const token = riderSnap && riderSnap.exists ? riderSnap.data().fcmToken : null;
+                if (!token) return;
+                const title = 'Upcoming pickup — be ready';
+                const body = `Pickup for ${updated.orderId || updated.id} at ${(updated.expectedTime || '').toString()}`;
+                const url = `${DELIVERMI_URL.replace(/\/$/, '')}/order/${encodeURIComponent(updated.id.toString())}`;
+                await admin.messaging().send({ token, notification: { title, body }, data: { type: 'REMINDER', orderId: updated.id.toString(), url } });
+              } catch (e) {
+                console.warn('Failed to send scheduled reminder', e && e.message ? e.message : e);
+              }
+            };
+
+            if (sendAt <= Date.now()) {
+              // send immediately
+              await sendReminder();
+            } else {
+              // schedule for later
+              schedule(notifyId, sendAt, sendReminder);
+            }
+          }
+        } catch (schedErr) {
+          console.warn('Failed to schedule driver reminder', schedErr && schedErr.message ? schedErr.message : schedErr);
+        }
+
         // Return updated order
         const updatedOrder = dbHelpers.getOrderById(orderId);
         return {
@@ -1502,6 +1561,87 @@ const resolvers = {
       } catch (error) {
         console.error('Error updating order status by rider:', error);
         throw new Error('Failed to update order status: ' + error.message);
+      }
+    },
+    /**
+     * Rider reports the order is not ready after waiting
+     */
+    riderReportNotReady: async (_, { orderId, waitedMinutes = 0 }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      try {
+        const order = dbHelpers.getOrderById(orderId);
+        if (!order) throw new Error('Order not found');
+        if (!order.riderId || order.riderId !== user.uid) throw new Error('Access denied: Not assigned to this rider');
+
+        const now = new Date().toISOString();
+        const statusHistory = JSON.parse(order.statusHistory || '[]');
+        statusHistory.push({ status: 'NOT_READY', timestamp: now, note: `Rider ${user.uid} waited ${waitedMinutes}m` });
+
+        dbHelpers.updateOrder(orderId, {
+          statusHistory,
+          updatedAt: now,
+        });
+
+        // Notify restaurant owner if possible (via firestore 'vendors' tokens) and log
+        try {
+          if (admin && admin.messaging && admin.firestore) {
+            const vendorDoc = await admin.firestore().collection('vendors').doc(order.restaurant).get().catch(() => null);
+            const vendorToken = vendorDoc && vendorDoc.exists ? vendorDoc.data().fcmToken : null;
+            const vendorOwner = dbHelpers.getRestaurantById(order.restaurant);
+            const title = 'Driver waiting — order not ready';
+            const body = `Driver ${user.uid} waited ${waitedMinutes} minute(s) for order ${order.orderId || order.id}`;
+            const data = { type: 'DRIVER_WAITING', orderId: order.id.toString() };
+            if (vendorToken) {
+              await admin.messaging().send({ token: vendorToken, notification: { title, body }, data });
+            }
+            // Also try sending to restaurant owner if they have a rider token stored in riders collection
+            if (vendorOwner && vendorOwner.ownerId) {
+              const ownerSnap = await admin.firestore().collection('riders').doc(vendorOwner.ownerId).get().catch(() => null);
+              const ownerToken = ownerSnap && ownerSnap.exists ? ownerSnap.data().fcmToken : null;
+              if (ownerToken) await admin.messaging().send({ token: ownerToken, notification: { title, body }, data });
+            }
+          }
+        } catch (notifyErr) {
+          console.warn('riderReportNotReady: failed to notify vendor', notifyErr && notifyErr.message ? notifyErr.message : notifyErr);
+        }
+
+        return true;
+      } catch (e) {
+        console.error('riderReportNotReady error', e.message || e);
+        throw new Error('Failed to report not ready');
+      }
+    },
+
+    /**
+     * Rider cancels order after excessive delay; server-side checks allowed
+     */
+    riderCancelOrder: async (_, { orderId, reason = '' }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      try {
+        const order = dbHelpers.getOrderById(orderId);
+        if (!order) throw new Error('Order not found');
+        if (!order.riderId || order.riderId !== user.uid) throw new Error('Access denied: Not assigned to this rider');
+
+        // Allow cancel if expectedTime is set and now is past expectedTime + 15 minutes
+        if (!order.expectedTime) throw new Error('Cannot cancel: no ETA available');
+        const expected = new Date(order.expectedTime).getTime();
+        if (Date.now() < expected + 15 * 60 * 1000) throw new Error('Too early to cancel: driver must wait longer before cancel');
+
+        const now = new Date().toISOString();
+        const statusHistory = JSON.parse(order.statusHistory || '[]');
+        statusHistory.push({ status: 'CANCELLED_BY_RIDER', timestamp: now, note: `Rider ${user.uid} cancelled: ${reason}` });
+
+        dbHelpers.updateOrder(orderId, {
+          orderStatus: 'CANCELLED',
+          statusHistory,
+          updatedAt: now,
+        });
+
+        // Optionally trigger refund / reassignment flows here (out of scope)
+        return true;
+      } catch (e) {
+        console.error('riderCancelOrder error', e.message || e);
+        throw new Error('Failed to cancel order');
       }
     },
   },

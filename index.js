@@ -129,6 +129,64 @@ async function startServer() {
     }
   });
 
+  // Return driver details for a given order (used by restaurant UI to show assigned driver)
+  app.get('/order-driver/:orderId', async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+      const { orderId } = req.params;
+      if (!orderId) return res.status(400).json({ error: 'orderId required' });
+
+      // Lookup order by id or public orderId
+      let order = dbHelpers.getOrderById(orderId);
+      if (!order) {
+        try {
+          const stmt = db.prepare('SELECT * FROM orders WHERE orderId = ?');
+          order = stmt.get(orderId);
+        } catch (e) { order = null; }
+      }
+      if (!order) return res.status(404).json({ error: 'Order not found' });
+
+      // Verify caller is the restaurant owner
+      const maybeRestaurant = dbHelpers.getRestaurantById(order.restaurant);
+      if (!maybeRestaurant || maybeRestaurant.ownerId !== req.user.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const riderId = order.riderId;
+      if (!riderId) return res.json({ assigned: false });
+
+      // Try to fetch rider profile from users table and Firestore riders collection
+      let riderProfile = dbHelpers.getUserByUid(riderId) || null;
+      let riderExtra = null;
+      try {
+        const snap = await admin.firestore().collection('riders').doc(riderId).get();
+        if (snap.exists) riderExtra = snap.data();
+      } catch (e) {
+        riderExtra = null;
+      }
+
+      // Count other active orders for the rider
+      const otherOrders = dbHelpers.getOrdersByRiderId(riderId) || [];
+      const activeCount = otherOrders.filter(o => o.id !== order.id && !['DELIVERED','CANCELLED'].includes(o.orderStatus)).length;
+
+      return res.json({
+        assigned: true,
+        rider: {
+          uid: riderId,
+          name: riderProfile ? (riderProfile.displayName || riderProfile.email) : (riderExtra && riderExtra.name) || null,
+          email: riderProfile ? riderProfile.email : (riderExtra && riderExtra.email) || null,
+          phone: riderProfile ? riderProfile.phoneNumber : (riderExtra && riderExtra.phone) || null,
+          fcmToken: riderExtra ? riderExtra.fcmToken : null,
+          available: riderExtra ? riderExtra.available : null,
+          activeOrders: activeCount,
+        }
+      });
+    } catch (e) {
+      console.error('/order-driver error', e.message || e);
+      return res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   const server = new ApolloServer({
     typeDefs,
     resolvers,

@@ -119,6 +119,7 @@ function initializeDatabase() {
       id TEXT PRIMARY KEY,
       orderId TEXT UNIQUE NOT NULL,
       userId TEXT NOT NULL,
+      riderId TEXT,
       restaurant TEXT NOT NULL,
       orderItems TEXT NOT NULL,
       orderAmount REAL NOT NULL,
@@ -128,6 +129,8 @@ function initializeDatabase() {
       orderDate TEXT NOT NULL,
       expectedTime TEXT,
       isPickedUp INTEGER DEFAULT 0,
+      pickupCode TEXT,
+      paymentProcessed INTEGER DEFAULT 0,
       deliveryCharges REAL DEFAULT 0,
       tipping REAL DEFAULT 0,
       taxationAmount REAL DEFAULT 0,
@@ -154,6 +157,26 @@ function initializeDatabase() {
 
   console.log('✅ Database schema initialized successfully');
 }
+
+// Ensure schema migrations for added columns (for existing DBs)
+function ensureOrderColumns() {
+  try {
+    const stmt = db.prepare("PRAGMA table_info('orders')");
+    const cols = stmt.all().map(r => r.name);
+    const additions = [];
+    if (!cols.includes('riderId')) additions.push("ALTER TABLE orders ADD COLUMN riderId TEXT");
+    if (!cols.includes('pickupCode')) additions.push("ALTER TABLE orders ADD COLUMN pickupCode TEXT");
+    if (!cols.includes('paymentProcessed')) additions.push("ALTER TABLE orders ADD COLUMN paymentProcessed INTEGER DEFAULT 0");
+    additions.forEach(sql => {
+      try { db.exec(sql); } catch (e) { /* ignore */ }
+    });
+  } catch (e) {
+    console.error('Error ensuring order columns:', e.message);
+  }
+}
+
+// run migrations
+ensureOrderColumns();
 
 // Initialize the database schema
 initializeDatabase();
@@ -497,6 +520,16 @@ const dbHelpers = {
   getOrderById(id) {
     const stmt = db.prepare('SELECT * FROM orders WHERE id = ?');
     return stmt.get(id);
+  },
+
+  getOrdersByRiderId(riderId) {
+    const stmt = db.prepare('SELECT * FROM orders WHERE riderId = ? ORDER BY createdAt DESC');
+    return stmt.all(riderId);
+  },
+
+  getAvailableOrders() {
+    const stmt = db.prepare("SELECT * FROM orders WHERE (orderStatus IN ('CONFIRMED','READY','PROCESSING')) AND (riderId IS NULL OR riderId = '') ORDER BY createdAt ASC");
+    return stmt.all();
   },
 
   updateOrder(id, updates) {
