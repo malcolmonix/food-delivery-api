@@ -4,6 +4,7 @@ const { ApolloServer } = require('apollo-server-express');
 const graphqlUploadExpress = require('graphql-upload/graphqlUploadExpress.js');
 const { typeDefs, resolvers } = require('./schema');
 const { admin } = require('./firebase');
+const { dbHelpers, db } = require('./database');
 
 async function startServer() {
   const app = express();
@@ -43,7 +44,39 @@ async function startServer() {
 
       const { orderId, pickupAddress, dropoffAddress, customerName, customerContact, vendorName, vendorContact } = body || {};
 
-      // Prepare notification payload
+      // Verify caller is owner of the restaurant for this order
+      try {
+        let orderRecord = null;
+        if (orderId) {
+          orderRecord = dbHelpers.getOrderById(orderId);
+          if (!orderRecord) {
+            // try lookup by the public orderId column
+            try {
+              const stmt = db.prepare('SELECT * FROM orders WHERE orderId = ?');
+              orderRecord = stmt.get(orderId);
+            } catch (e) {
+              orderRecord = null;
+            }
+          }
+        }
+
+        if (!orderRecord) return res.status(404).json({ error: 'Order not found or cannot verify ownership' });
+
+        // orderRecord.restaurant may be a restaurant id; verify owner
+        const maybeRestaurant = dbHelpers.getRestaurantById(orderRecord.restaurant);
+        if (!maybeRestaurant || maybeRestaurant.ownerId !== req.user.uid) {
+          return res.status(403).json({ error: 'Forbidden: Only the restaurant owner may call this endpoint' });
+        }
+      } catch (e) {
+        console.warn('notify-ready: ownership verification failed', e.message || e);
+        return res.status(500).json({ error: 'Failed to verify ownership' });
+      }
+
+      // Build deep-link URL to DeliverMi (rider app)
+      const DELIVERMI_URL = process.env.DELIVERMI_URL || 'http://localhost:9010';
+      const deepLink = `${DELIVERMI_URL.replace(/\/$/, '')}/order/${encodeURIComponent(orderId || '')}`;
+
+      // Prepare notification payload (include `url` for the SW click handler)
       const message = {
         notification: {
           title: 'Order ready for pickup',
@@ -58,6 +91,7 @@ async function startServer() {
           customerContact: customerContact || '',
           vendorName: vendorName || '',
           vendorContact: vendorContact || '',
+          url: deepLink,
         }
       };
 

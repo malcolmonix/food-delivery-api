@@ -3,6 +3,7 @@ const { dbHelpers, generateId } = require('./database');
 const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
+const DELIVERMI_URL = process.env.DELIVERMI_URL || 'http://localhost:9010';
 
 const typeDefs = gql`
   scalar Upload
@@ -821,12 +822,13 @@ const resolvers = {
             });
 
             if (tokens.length) {
+              const deepLink = `${DELIVERMI_URL.replace(/\/$/, '')}/order/${encodeURIComponent(id.toString())}`;
               const message = {
                 notification: {
                   title: 'New delivery available',
                   body: `${restaurant} — ${orderInput.length} item(s)`,
                 },
-                data: { orderId: id.toString(), type: 'NEW_ORDER' },
+                data: { orderId: id.toString(), type: 'NEW_ORDER', url: deepLink },
               };
 
               // chunk tokens to avoid size limits
@@ -969,6 +971,7 @@ const resolvers = {
             });
 
             if (tokens.length) {
+              const deepLink = `${DELIVERMI_URL.replace(/\/$/, '')}/order/${encodeURIComponent(updated.id.toString())}`;
               const payload = {
                 notification: {
                   title,
@@ -983,6 +986,7 @@ const resolvers = {
                   customerContact: customer ? (customer.phoneNumber || customer.email || '') : '',
                   vendorName: vendor ? vendor.name || '' : (updated.restaurant || ''),
                   vendorContact: vendor ? (vendor.phoneNumber || vendor.contactEmail || '') : '',
+                  url: deepLink,
                 }
               };
 
