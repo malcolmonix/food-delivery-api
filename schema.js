@@ -117,6 +117,9 @@ const typeDefs = gql`
     orderDate: String!
     expectedTime: String
     isPickedUp: Boolean
+    riderId: String
+    pickupCode: String
+    paymentProcessed: Boolean
     deliveryCharges: Float
     tipping: Float
     taxationAmount: Float
@@ -145,6 +148,8 @@ const typeDefs = gql`
     menuItems(restaurantId: ID!): [MenuItem!]!
     menuItem(id: ID!): MenuItem
     menuCategories(restaurantId: ID!): [MenuCategory!]!
+    # Orders available for riders to accept
+    availableOrders: [Order!]!
   }
 
   type Mutation {
@@ -265,6 +270,9 @@ const typeDefs = gql`
     uploadRestaurantLogo(restaurantId: ID!, file: Upload!): Restaurant!
     uploadRestaurantBanner(restaurantId: ID!, file: Upload!): Restaurant!
     uploadMenuItemImage(restaurantId: ID!, menuItemId: ID!, file: Upload!): MenuItem!
+    # Rider workflows
+    assignRider(orderId: ID!): Order!
+    riderUpdateOrderStatus(orderId: ID!, status: String!, code: String): Order!
   }
 
   input OpeningHourInput {
@@ -467,6 +475,24 @@ const resolvers = {
       } catch (error) {
         console.error('Error fetching menu categories:', error);
         throw new Error('Failed to fetch menu categories');
+      }
+    },
+    /**
+     * Get orders available for riders (unassigned)
+     */
+    availableOrders: async () => {
+      try {
+        const orders = dbHelpers.getAvailableOrders();
+        return orders.map(order => ({
+          ...order,
+          orderItems: JSON.parse(order.orderItems),
+          statusHistory: JSON.parse(order.statusHistory),
+          isPickedUp: Boolean(order.isPickedUp),
+          paymentProcessed: Boolean(order.paymentProcessed),
+        }));
+      } catch (error) {
+        console.error('Error fetching available orders:', error);
+        throw new Error('Failed to fetch available orders');
       }
     },
   },
@@ -783,6 +809,42 @@ const resolvers = {
         const id = dbHelpers.createOrder(orderData);
         console.log('Order saved successfully with ID:', id);
 
+        // Send push notification to riders via FCM when a new available order is placed
+        try {
+          if (admin && admin.messaging && admin.firestore) {
+            const firestore = admin.firestore();
+            const ridersSnapshot = await firestore.collection('riders').get();
+            const tokens = [];
+            ridersSnapshot.forEach(doc => {
+              const data = doc.data();
+              if (data && data.fcmToken) tokens.push(data.fcmToken);
+            });
+
+            if (tokens.length) {
+              const message = {
+                notification: {
+                  title: 'New delivery available',
+                  body: `${restaurant} — ${orderInput.length} item(s)`,
+                },
+                data: { orderId: id.toString(), type: 'NEW_ORDER' },
+              };
+
+              // chunk tokens to avoid size limits
+              const chunkSize = 500;
+              for (let i = 0; i < tokens.length; i += chunkSize) {
+                const chunk = tokens.slice(i, i + chunkSize);
+                try {
+                  await admin.messaging().sendMulticast({ tokens: chunk, ...message });
+                } catch (sendErr) {
+                  console.warn('FCM sendMulticast failed for chunk:', sendErr.message || sendErr);
+                }
+              }
+            }
+          }
+        } catch (notifyErr) {
+          console.warn('Failed to send rider notifications:', notifyErr.message || notifyErr);
+        }
+
         return {
           id,
           ...orderData,
@@ -818,9 +880,18 @@ const resolvers = {
           throw new Error('Order not found');
         }
 
-        // Check if order belongs to user
-        if (currentOrder.userId !== user.uid) {
-          throw new Error('Access denied: Can only update your own orders');
+        // Check if order belongs to user OR the user is the restaurant owner
+        let isAllowedToUpdate = false;
+        if (currentOrder.userId === user.uid) isAllowedToUpdate = true;
+        try {
+          const maybeRestaurant = dbHelpers.getRestaurantById(currentOrder.restaurant);
+          if (maybeRestaurant && maybeRestaurant.ownerId === user.uid) isAllowedToUpdate = true;
+        } catch (e) {
+          // ignore - restaurant lookup may fail if restaurant stored as name
+        }
+
+        if (!isAllowedToUpdate) {
+          throw new Error('Access denied: Can only update your own orders or orders for your restaurant');
         }
 
         const currentStatus = currentOrder.orderStatus;
@@ -851,6 +922,84 @@ const resolvers = {
         });
 
         console.log(`Order ${orderId} status updated: ${currentStatus} → ${status}`);
+
+        // Notify riders when order enters preparing/processing or ready/out-for-delivery states
+        try {
+          const notifyStatuses = ['PROCESSING', 'PREPARING', 'READY', 'READY_FOR_PICKUP', 'OUT_FOR_DELIVERY'];
+          if (notifyStatuses.includes(status) && admin && admin.messaging && admin.firestore) {
+            const updated = dbHelpers.getOrderById(orderId);
+
+            // Fetch customer info if available
+            let customer = null;
+            try { customer = await getUserById(updated.userId); } catch (e) { customer = null; }
+
+            // Try to fetch restaurant details if restaurant value looks like an id
+            let vendor = null;
+            try {
+              const maybeVendor = dbHelpers.getRestaurantById(updated.restaurant);
+              if (maybeVendor) vendor = maybeVendor;
+            } catch (e) {
+              vendor = null;
+            }
+
+            const pickupAddress = (vendor && vendor.address) || updated.address || '';
+            const dropoffAddress = updated.address || '';
+
+            // Determine messaging content based on stage
+            let title = 'Order update';
+            let body = `${(vendor && vendor.name) || updated.restaurant || 'Order'} — ${dropoffAddress}`;
+            let dataType = 'ORDER_UPDATE';
+            if (['PROCESSING', 'PREPARING'].includes(status)) {
+              title = 'Order preparing — early pickup available';
+              body = `${(vendor && vendor.name) || updated.restaurant || 'Vendor'} is preparing the order. Pick up early to be first.`;
+              dataType = 'ORDER_PREPARING';
+            } else if (['READY', 'READY_FOR_PICKUP', 'OUT_FOR_DELIVERY'].includes(status)) {
+              title = 'Order ready for pickup';
+              body = `${(vendor && vendor.name) || updated.restaurant || 'Vendor'} — ${pickupAddress || dropoffAddress}`;
+              dataType = 'ORDER_READY';
+            }
+
+            // Collect tokens for available riders
+            const firestore = admin.firestore();
+            const ridersSnapshot = await firestore.collection('riders').get();
+            const tokens = [];
+            ridersSnapshot.forEach(doc => {
+              const data = doc.data();
+              if (data && data.fcmToken && (data.available === undefined || data.available === true)) tokens.push(data.fcmToken);
+            });
+
+            if (tokens.length) {
+              const payload = {
+                notification: {
+                  title,
+                  body,
+                },
+                data: {
+                  type: dataType,
+                  orderId: updated.id.toString(),
+                  pickupAddress: pickupAddress,
+                  dropoffAddress: dropoffAddress,
+                  customerName: customer ? customer.displayName || customer.email || '' : '',
+                  customerContact: customer ? (customer.phoneNumber || customer.email || '') : '',
+                  vendorName: vendor ? vendor.name || '' : (updated.restaurant || ''),
+                  vendorContact: vendor ? (vendor.phoneNumber || vendor.contactEmail || '') : '',
+                }
+              };
+
+              const chunkSize = 500;
+              for (let i = 0; i < tokens.length; i += chunkSize) {
+                const chunk = tokens.slice(i, i + chunkSize);
+                try {
+                  await admin.messaging().sendMulticast({ tokens: chunk, ...payload });
+                } catch (err) {
+                  console.warn('Failed sending notification chunk:', err.message || err);
+                }
+              }
+            }
+          }
+        } catch (notifyErr) {
+          console.warn('Error sending notifications:', notifyErr.message || notifyErr);
+        }
 
         // Return updated order
         const updatedOrder = dbHelpers.getOrderById(orderId);
@@ -1264,6 +1413,91 @@ const resolvers = {
       } catch (error) {
         console.error('Error uploading menu item image:', error);
         throw new Error('Failed to upload menu item image: ' + error.message);
+      }
+    },
+    /**
+     * Assign a rider to an order
+     */
+    assignRider: async (_, { orderId }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        const order = dbHelpers.getOrderById(orderId);
+        if (!order) throw new Error('Order not found');
+        if (order.riderId) throw new Error('Order already assigned');
+
+        // Generate a 6-digit pickup code for verification
+        const pickupCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        dbHelpers.updateOrder(orderId, {
+          riderId: user.uid,
+          pickupCode,
+          orderStatus: 'ASSIGNED',
+          updatedAt: new Date().toISOString(),
+        });
+
+        const updated = dbHelpers.getOrderById(orderId);
+        return {
+          ...updated,
+          orderItems: JSON.parse(updated.orderItems),
+          statusHistory: JSON.parse(updated.statusHistory),
+          isPickedUp: Boolean(updated.isPickedUp),
+          paymentProcessed: Boolean(updated.paymentProcessed),
+        };
+      } catch (error) {
+        console.error('Error assigning rider:', error);
+        throw new Error('Failed to assign rider: ' + error.message);
+      }
+    },
+
+    /**
+     * Rider updates order status (PICKED_UP, OUT_FOR_DELIVERY, DELIVERED)
+     */
+    riderUpdateOrderStatus: async (_, { orderId, status, code }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        const order = dbHelpers.getOrderById(orderId);
+        if (!order) throw new Error('Order not found');
+        if (!order.riderId || order.riderId !== user.uid) throw new Error('Access denied: Not assigned to this rider');
+
+        // If delivering, verify code
+        if (status === 'DELIVERED') {
+          if (!code) throw new Error('Delivery code required');
+          if (order.pickupCode !== code) throw new Error('Invalid delivery code');
+        }
+
+        const now = new Date().toISOString();
+        const statusHistory = JSON.parse(order.statusHistory || '[]');
+        statusHistory.push({ status, timestamp: now, note: `Rider ${user.uid} set status ${status}` });
+
+        const updates = {
+          orderStatus: status,
+          statusHistory,
+          updatedAt: now,
+        };
+
+        if (status === 'PICKED_UP') {
+          updates.isPickedUp = true;
+        }
+
+        if (status === 'DELIVERED') {
+          updates.paymentProcessed = 1;
+        }
+
+        dbHelpers.updateOrder(orderId, updates);
+
+        const updated = dbHelpers.getOrderById(orderId);
+        return {
+          ...updated,
+          orderItems: JSON.parse(updated.orderItems),
+          statusHistory: JSON.parse(updated.statusHistory),
+          isPickedUp: Boolean(updated.isPickedUp),
+          paymentProcessed: Boolean(updated.paymentProcessed),
+        };
+      } catch (error) {
+        console.error('Error updating order status by rider:', error);
+        throw new Error('Failed to update order status: ' + error.message);
       }
     },
   },
