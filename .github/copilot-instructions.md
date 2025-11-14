@@ -213,3 +213,12 @@ The following tasks are the highest priority (complete these first). After these
 
 If you'd like, I will start immediately on the top item: "Verify and fix the Order Flow" — I can run the API locally, run a quick integration script that places an order, simulate vendor `notify-ready`, and observe FCM sending (or stub it). Tell me to proceed and whether to run the Playwright browser tests as part of the verification step.
 
+Docs & Progress Discipline
+- Whenever you change code or behavior in `api/`, update `api/` docs and the workspace todo list:
+	1. Run the relevant tests or a smoke test locally.
+	2. Update `API-QUICK-REFERENCE.md` or `API-ENDPOINTS.md` with any new/changed endpoints and usage.
+	3. Update `api/.github/copilot-instructions.md` with short notes about the change and link to the PR.
+	4. Mark the todo item(s) as completed with `manage_todo_list` and add follow-ups.
+
+This helps keep the repo-level and workspace-level docs synchronized and ensures our team and AI agents can track progress reliably.
+
