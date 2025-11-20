@@ -226,10 +226,10 @@ const dbHelpers = {
   updateUser(uid, updates) {
     const fields = Object.keys(updates).filter(k => k !== 'uid' && k !== 'id');
     if (fields.length === 0) return;
-    
+
     const setClause = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => updates[f]);
-    
+
     const stmt = db.prepare(`UPDATE users SET ${setClause} WHERE uid = ?`);
     stmt.run(...values, uid);
   },
@@ -270,7 +270,7 @@ const dbHelpers = {
   updateAddress(id, updates) {
     const fields = Object.keys(updates).filter(k => k !== 'id');
     if (fields.length === 0) return;
-    
+
     const setClause = fields.map(f => {
       if (f === 'isDefault') return `${f} = ?`;
       return `${f} = ?`;
@@ -279,7 +279,7 @@ const dbHelpers = {
       if (f === 'isDefault') return updates[f] ? 1 : 0;
       return updates[f];
     });
-    
+
     const stmt = db.prepare(`UPDATE addresses SET ${setClause} WHERE id = ?`);
     stmt.run(...values, id);
   },
@@ -363,17 +363,22 @@ const dbHelpers = {
     return stmt.get(id);
   },
 
+  getRestaurantByOwnerId(ownerId) {
+    const stmt = db.prepare('SELECT * FROM restaurants WHERE ownerId = ? LIMIT 1');
+    return stmt.get(ownerId);
+  },
+
   updateRestaurant(id, updates) {
     const fields = Object.keys(updates).filter(k => k !== 'id');
     if (fields.length === 0) return;
-    
+
     const setClause = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => {
       if (f === 'cuisine' || f === 'openingHours') return JSON.stringify(updates[f]);
       if (f === 'isActive') return updates[f] ? 1 : 0;
       return updates[f];
     });
-    
+
     const stmt = db.prepare(`UPDATE restaurants SET ${setClause} WHERE id = ?`);
     stmt.run(...values, id);
   },
@@ -417,14 +422,14 @@ const dbHelpers = {
   updateMenuItem(id, updates) {
     const fields = Object.keys(updates).filter(k => k !== 'id');
     if (fields.length === 0) return;
-    
+
     const setClause = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => {
       if (f === 'allergens') return JSON.stringify(updates[f]);
       if (f === 'isAvailable' || f === 'isVegetarian' || f === 'isVegan') return updates[f] ? 1 : 0;
       return updates[f];
     });
-    
+
     const stmt = db.prepare(`UPDATE menu_items SET ${setClause} WHERE id = ?`);
     stmt.run(...values, id);
   },
@@ -466,10 +471,10 @@ const dbHelpers = {
   updateMenuCategory(id, updates) {
     const fields = Object.keys(updates).filter(k => k !== 'id');
     if (fields.length === 0) return;
-    
+
     const setClause = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => updates[f]);
-    
+
     const stmt = db.prepare(`UPDATE menu_categories SET ${setClause} WHERE id = ?`);
     stmt.run(...values, id);
   },
@@ -535,14 +540,14 @@ const dbHelpers = {
   updateOrder(id, updates) {
     const fields = Object.keys(updates).filter(k => k !== 'id');
     if (fields.length === 0) return;
-    
+
     const setClause = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => {
       if (f === 'orderItems' || f === 'statusHistory') return JSON.stringify(updates[f]);
       if (f === 'isPickedUp') return updates[f] ? 1 : 0;
       return updates[f];
     });
-    
+
     const stmt = db.prepare(`UPDATE orders SET ${setClause} WHERE id = ?`);
     stmt.run(...values, id);
   },

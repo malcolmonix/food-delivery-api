@@ -229,6 +229,8 @@ const typeDefs = gql`
       priceRange: String
       openingHours: [OpeningHourInput!]
       isActive: Boolean
+      logoUrl: String
+      bannerUrl: String
     ): Restaurant!
     createMenuItem(
       restaurantId: ID!
@@ -1115,7 +1117,7 @@ const resolvers = {
     /**
      * Update a restaurant
      */
-    updateRestaurant: async (_, { id, name, description, contactEmail, phoneNumber, address, cuisine, priceRange, openingHours, isActive }, { user }) => {
+    updateRestaurant: async (_, { id, name, description, contactEmail, phoneNumber, address, cuisine, priceRange, openingHours, isActive, logoUrl, bannerUrl }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
@@ -1133,6 +1135,8 @@ const resolvers = {
         if (priceRange !== undefined) updateData.priceRange = priceRange;
         if (openingHours !== undefined) updateData.openingHours = openingHours;
         if (isActive !== undefined) updateData.isActive = isActive;
+        if (logoUrl !== undefined) updateData.logoUrl = logoUrl;
+        if (bannerUrl !== undefined) updateData.bannerUrl = bannerUrl;
 
         dbHelpers.updateRestaurant(id, updateData);
 
