@@ -146,6 +146,7 @@ const typeDefs = gql`
     addresses: [Address!]!
     address(id: ID!): Address
     restaurants(search: String, cuisine: String, limit: Int, offset: Int): [Restaurant!]!
+    eateriesByLocation(city: String, lat: Float, lng: Float, radiusMeters: Int, limit: Int): [Restaurant!]!
     restaurant(id: ID!): Restaurant
     menuItems(restaurantId: ID!): [MenuItem!]!
     menuItem(id: ID!): MenuItem
@@ -276,6 +277,7 @@ const typeDefs = gql`
     uploadRestaurantLogo(restaurantId: ID!, file: Upload!): Restaurant!
     uploadRestaurantBanner(restaurantId: ID!, file: Upload!): Restaurant!
     uploadMenuItemImage(restaurantId: ID!, menuItemId: ID!, file: Upload!): MenuItem!
+    importImageFromUrl(imageUrl: String!, folder: String): String!
     # Rider workflows
     assignRider(orderId: ID!): Order!
     riderUpdateOrderStatus(orderId: ID!, status: String!, code: String): Order!
@@ -415,6 +417,30 @@ const resolvers = {
       } catch (error) {
         console.error('Error fetching restaurants:', error);
         throw new Error('Failed to fetch restaurants');
+      }
+    },
+    /**
+     * List eateries appropriate for a given location. For MVP this supports querying by city or by lat/lng + radiusMeters.
+     */
+    eateriesByLocation: async (_, { city, lat, lng, radiusMeters = 5000, limit = 50 }) => {
+      try {
+        const filters = { limit, isActive: true };
+        if (city) filters.city = city;
+        if (lat !== undefined && lng !== undefined) {
+          filters.lat = lat;
+          filters.lng = lng;
+          filters.radiusMeters = radiusMeters;
+        }
+        const restaurants = dbHelpers.getRestaurantsByLocation(filters);
+        return restaurants.map(r => ({
+          ...r,
+          cuisine: JSON.parse(r.cuisine || '[]'),
+          openingHours: JSON.parse(r.openingHours || '[]'),
+          isActive: Boolean(r.isActive),
+        }));
+      } catch (err) {
+        console.error('Error fetching eateriesByLocation:', err);
+        throw new Error('Failed to fetch eateries by location');
       }
     },
     /**
@@ -1648,6 +1674,65 @@ const resolvers = {
         throw new Error('Failed to cancel order');
       }
     },
+
+    /**
+     * Import an image from a remote URL (e.g., a client-side temporary Firebase Storage URL)
+     * The server will fetch the remote image, validate it, and upload it to the canonical store (imgbb).
+     */
+    importImageFromUrl: async (_, { imageUrl, folder }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        if (!imageUrl) throw new Error('imageUrl is required');
+
+        // Fetch remote image
+        const response = await axios.get(imageUrl, { responseType: 'arraybuffer', maxContentLength: Infinity, maxBodyLength: Infinity });
+        const buffer = Buffer.from(response.data, 'binary');
+        const mimetype = response.headers['content-type'] || 'image/jpeg';
+
+        // Validate file type
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
+        if (!allowedTypes.includes(mimetype)) {
+          throw new Error(`Invalid file type: ${mimetype}. Allowed types: ${allowedTypes.join(', ')}`);
+        }
+
+        // Convert to base64
+        const base64Image = buffer.toString('base64');
+
+        // Upload to imgbb using same logic as uploadFileToStorage
+        const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '7423450f81b14c198b65e9d2ba033c5b';
+        const filename = `${folder || 'images'}-${Date.now()}-import`;
+
+        const formData = new FormData();
+        formData.append('image', base64Image);
+        formData.append('name', filename);
+
+        const imgbbResp = await axios.post(
+          `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
+          formData,
+          {
+            headers: formData.getHeaders(),
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+          }
+        );
+
+        if (imgbbResp.data && imgbbResp.data.data && imgbbResp.data.data.url) {
+          const imageUrlResult = imgbbResp.data.data.url;
+          console.log('✅ Imported remote image to imgbb:', imageUrlResult);
+          return imageUrlResult;
+        }
+
+        throw new Error('Invalid response from imgbb API while importing image');
+      } catch (error) {
+        console.error('Error importing image from URL:', error.message || error);
+        if (error.response) {
+          console.error('remote fetch/upload error:', error.response.data || error.response.statusText);
+          throw new Error('Failed to import image: ' + (error.response.data?.error?.message || error.message));
+        }
+        throw new Error('Failed to import image: ' + error.message);
+      }
+    },
   },
 };
 
@@ -1658,7 +1743,7 @@ const resolvers = {
  * @returns {Promise<string>} The public URL of the uploaded file
  */
 async function uploadFileToStorage(file, folder = 'images') {
-  const IMGBB_API_KEY = '7423450f81b14c198b65e9d2ba033c5b';
+  const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '7423450f81b14c198b65e9d2ba033c5b';
   
   try {
     const { createReadStream, filename, mimetype } = await file;

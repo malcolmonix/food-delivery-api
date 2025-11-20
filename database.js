@@ -65,6 +65,8 @@ function initializeDatabase() {
       contactEmail TEXT,
       phoneNumber TEXT,
       address TEXT,
+      latitude REAL,
+      longitude REAL,
       cuisine TEXT,
       priceRange TEXT,
       rating REAL,
@@ -75,6 +77,42 @@ function initializeDatabase() {
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL,
       FOREIGN KEY (ownerId) REFERENCES users(uid) ON DELETE CASCADE
+    )
+  `);
+
+  // Order status codes (lookup table)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS order_status_codes (
+      code TEXT PRIMARY KEY,
+      description TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    )
+  `);
+
+  // Delivery zones table (simple polygons stored as GeoJSON or center+radius)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS delivery_zones (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      city TEXT,
+      centerLat REAL,
+      centerLng REAL,
+      radiusMeters INTEGER,
+      geojson TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    )
+  `);
+
+  // Map restaurants to delivery zones
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS restaurant_zones (
+      id TEXT PRIMARY KEY,
+      restaurantId TEXT NOT NULL,
+      zoneId TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      FOREIGN KEY (restaurantId) REFERENCES restaurants(id) ON DELETE CASCADE,
+      FOREIGN KEY (zoneId) REFERENCES delivery_zones(id) ON DELETE CASCADE
     )
   `);
 
@@ -153,6 +191,8 @@ function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_menu_categories_restaurantId ON menu_categories(restaurantId);
     CREATE INDEX IF NOT EXISTS idx_orders_userId ON orders(userId);
     CREATE INDEX IF NOT EXISTS idx_orders_orderId ON orders(orderId);
+    CREATE INDEX IF NOT EXISTS idx_restaurants_city ON restaurants(address);
+    CREATE INDEX IF NOT EXISTS idx_zones_city ON delivery_zones(city);
   `);
 
   console.log('✅ Database schema initialized successfully');
@@ -177,6 +217,24 @@ function ensureOrderColumns() {
 
 // run migrations
 ensureOrderColumns();
+
+// Ensure restaurants have latitude/longitude columns for location queries
+function ensureRestaurantColumns() {
+  try {
+    const stmt = db.prepare("PRAGMA table_info('restaurants')");
+    const cols = stmt.all().map(r => r.name);
+    const additions = [];
+    if (!cols.includes('latitude')) additions.push('ALTER TABLE restaurants ADD COLUMN latitude REAL');
+    if (!cols.includes('longitude')) additions.push('ALTER TABLE restaurants ADD COLUMN longitude REAL');
+    additions.forEach(sql => {
+      try { db.exec(sql); } catch (e) { /* ignore if already exists or other issues */ }
+    });
+  } catch (e) {
+    console.error('Error ensuring restaurant columns:', e.message);
+  }
+}
+
+ensureRestaurantColumns();
 
 // Initialize the database schema
 initializeDatabase();
@@ -337,6 +395,29 @@ const dbHelpers = {
       params.push(`%"${filters.cuisine}"%`);
     }
 
+    // Support basic location filter by city or bounding box in filters
+    if (filters.city) {
+      query += ' AND address LIKE ?';
+      params.push(`%${filters.city}%`);
+    }
+
+    if (filters.lat !== undefined && filters.lng !== undefined && filters.radiusMeters) {
+      // If restaurants have latitude/longitude, perform a simple distance filter using approximate Haversine
+      // This is an approximate filter using bounding box to limit results then post-filter in JS
+      const lat = parseFloat(filters.lat);
+      const lng = parseFloat(filters.lng);
+      const r = parseFloat(filters.radiusMeters);
+      // compute bounding box (approx) in degrees (very rough)
+      const degLat = r / 111320; // meters per degree latitude
+      const degLng = r / (111320 * Math.cos(lat * Math.PI / 180) || 1);
+      const minLat = lat - degLat;
+      const maxLat = lat + degLat;
+      const minLng = lng - degLng;
+      const maxLng = lng + degLng;
+      query += ' AND latitude IS NOT NULL AND longitude IS NOT NULL AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?';
+      params.push(minLat, maxLat, minLng, maxLng);
+    }
+
     if (filters.isActive !== undefined) {
       query += ' AND isActive = ?';
       params.push(filters.isActive ? 1 : 0);
@@ -362,10 +443,18 @@ const dbHelpers = {
     const stmt = db.prepare('SELECT * FROM restaurants WHERE id = ?');
     return stmt.get(id);
   },
-
   getRestaurantByOwnerId(ownerId) {
     const stmt = db.prepare('SELECT * FROM restaurants WHERE ownerId = ? LIMIT 1');
     return stmt.get(ownerId);
+  },
+
+  /**
+   * Find eateries by location filters (city, lat/lng + radiusMeters)
+   * For MVP this supports city-based search or simple lat/lng radius using stored restaurant latitude/longitude.
+   */
+  getRestaurantsByLocation(filters = {}) {
+    // Reuse getRestaurants but pass location filters
+    return this.getRestaurants(filters);
   },
 
   updateRestaurant(id, updates) {
