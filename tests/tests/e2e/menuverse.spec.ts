@@ -34,9 +34,14 @@ async function authenticateVendor(page: Page, email: string = DEMO_VENDOR_EMAIL,
     await page.waitForLoadState('networkidle');
   }
 
+  // Wait a bit more for the page to fully load
+  await page.waitForTimeout(2000);
+
   // First, check if a demo login button exists and use it (faster for testing)
-  const demoButton = page.locator('button:has-text("Demo Login"), button:has-text("🚀 Demo Login")');
+  const demoButton = page.locator('button:has-text("🚀 Demo Login")');
   const demoButtonExists = await demoButton.count() > 0;
+
+  console.log(`Demo button exists: ${demoButtonExists}`);
 
   if (demoButtonExists && email === DEMO_VENDOR_EMAIL) {
     console.log('🎯 Using demo login button for faster authentication');

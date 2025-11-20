@@ -187,6 +187,68 @@ async function startServer() {
     }
   });
 
+  // Webhook: rider location updates
+  app.post('/api/webhooks/rider-location-update', async (req, res) => {
+    try {
+      const apiKey = req.headers['x-api-key'] || req.headers['x-api_key'] || req.headers['x-api'] || '';
+      const expected = process.env.DELIVERMI_WEBHOOK_API_KEY || process.env.CHOPCHOP_WEBHOOK_API_KEY || '';
+      if (!expected || !apiKey || apiKey !== expected) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+
+      const payload = req.body || {};
+      const { orderId, riderId, latitude, longitude, heading, speed, timestamp } = payload;
+      if (!orderId || !riderId || typeof latitude !== 'number' || typeof longitude !== 'number') {
+        return res.status(400).json({ error: 'Invalid payload; required: orderId, riderId, latitude, longitude' });
+      }
+
+      const firestore = admin.firestore();
+
+      const loc = {
+        lat: latitude,
+        lng: longitude,
+        heading: heading || null,
+        speed: speed || null,
+        at: timestamp || new Date().toISOString(),
+        riderId
+      };
+
+      // Write to rider-locations/{riderId} for quick lookup
+      try {
+        await firestore.collection('rider-locations').doc(riderId).set({
+          location: loc,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (e) {
+        console.warn('rider-location-update: failed writing rider-locations', e.message || e);
+      }
+
+      // Update the customer-facing order document (customer-orders/{orderId}) with latest rider location
+      try {
+        const orderRef = firestore.collection('customer-orders').doc(orderId);
+        await orderRef.set({
+          rider: {
+            id: riderId,
+            location: loc
+          },
+          lastRiderLocationAt: loc.at
+        }, { merge: true });
+
+        // Also append a tracking update entry for history
+        await orderRef.update({
+          trackingUpdates: admin.firestore.FieldValue.arrayUnion(loc)
+        });
+      } catch (e) {
+        console.warn('rider-location-update: failed writing customer-orders', e.message || e);
+      }
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error('rider-location-update error', err.message || err);
+      return res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   const server = new ApolloServer({
     typeDefs,
     resolvers,

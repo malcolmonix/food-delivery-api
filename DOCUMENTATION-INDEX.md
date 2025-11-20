@@ -34,6 +34,7 @@ This Firebase GraphQL API powers the ChopChop food delivery platform. Below is a
 | **[ENVIRONMENT-VARIABLES.md](ENVIRONMENT-VARIABLES.md)** | Firebase credentials setup | DevOps/Developers |
 | **[API-QUICK-REFERENCE.md](API-QUICK-REFERENCE.md)** | Fast GraphQL reference | Developers |
 | **[API-ENDPOINTS.md](API-ENDPOINTS.md)** | All endpoints and operations | Developers |
+| **[../docs/IMAGE-HANDLING-GUIDE.md](../docs/IMAGE-HANDLING-GUIDE.md)** | Unified image upload/display guide | Developers |
 
 ### **Code Files**
 | File | Purpose |
