@@ -57,23 +57,41 @@ if (hasValidCredentials) {
     console.warn('⚠️  Firebase Storage initialization failed:', error.message);
     console.log('✅ Firebase initialized successfully (without Storage)');
   }
-  doc: () => ({
-    get: async () => ({ exists: false, data: () => null }),
-    set: async () => ({ writeTime: new Date() }),
-    update: async () => ({ writeTime: new Date() }),
-    delete: async () => ({ writeTime: new Date() })
-  }),
-    add: async () => ({ id: 'mock-id' }),
-      where: () => ({
-        where: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+  console.log('✅ Firebase initialized successfully with real credentials');
+} else {
+  console.warn('⚠️  Running without Firebase credentials - using mock services');
+
+  // Mock admin for environments without credentials
+  admin_instance = {
+    auth: () => ({
+      createUser: async () => ({ uid: 'mock-uid', email: 'mock@example.com' }),
+      getUserByEmail: async () => ({ uid: 'mock-uid', email: 'mock@example.com' }),
+      verifyIdToken: async () => ({ uid: 'mock-uid' }),
+      createCustomToken: async () => 'mock-token'
+    }),
+    firestore: () => ({
+      collection: () => ({
+        doc: () => ({
+          get: async () => ({ exists: false, data: () => null }),
+          set: async () => ({ writeTime: new Date() }),
+          update: async () => ({ writeTime: new Date() }),
+          delete: async () => ({ writeTime: new Date() })
+        }),
+        add: async () => ({ id: 'mock-id' }),
+        where: () => ({
+          where: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+          get: async () => ({ empty: true, docs: [] })
+        }),
         get: async () => ({ empty: true, docs: [] })
-      }),
-        get: async () => ({ empty: true, docs: [] })
-})
+      })
+    })
   };
 
-// Mock bucket for environments without storage
-bucket = null;
+  // Mock Firestore
+  db = admin_instance.firestore();
+
+  // Mock bucket for environments without storage
+  bucket = null;
 }
 
 module.exports = { admin: admin_instance, db, bucket };

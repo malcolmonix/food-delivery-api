@@ -622,7 +622,9 @@ const dbHelpers = {
   },
 
   getAvailableOrders() {
-    const stmt = db.prepare("SELECT * FROM orders WHERE (orderStatus IN ('CONFIRMED','READY','PROCESSING')) AND (riderId IS NULL OR riderId = '') ORDER BY createdAt ASC");
+    // Only return orders that are READY (vendor has marked them ready for pickup)
+    // and have no rider assigned yet
+    const stmt = db.prepare("SELECT * FROM orders WHERE orderStatus = 'READY' AND (riderId IS NULL OR riderId = '') ORDER BY createdAt ASC");
     return stmt.all();
   },
 

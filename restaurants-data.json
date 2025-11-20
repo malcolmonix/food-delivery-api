@@ -1,0 +1,24 @@
+{
+  "data": {
+    "restaurants": [
+      {
+        "id": "1762910637873-xt703hm8f",
+        "name": "Test Restaurant",
+        "description": "An amazing place to eat with great service",
+        "logoUrl": null,
+        "bannerUrl": null,
+        "contactEmail": "contact@testrestaurant.com",
+        "phoneNumber": "+1987654321",
+        "address": "123 Test Street, Test City",
+        "cuisine": [
+          "Italian",
+          "Pizza"
+        ],
+        "priceRange": "$$",
+        "rating": null,
+        "reviewCount": 0,
+        "isActive": true
+      }
+    ]
+  }
+}
