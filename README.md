@@ -83,12 +83,29 @@ FIREBASE_CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/
 PORT=4000
 ```
 
+## Deployment
+
+This API can be deployed to Vercel as a serverless function. See the [Vercel Deployment Guide](VERCEL-DEPLOYMENT.md) for detailed instructions.
+
+**Quick Deploy:**
+1. Install Vercel CLI: `npm i -g vercel`
+2. Deploy: `vercel`
+3. Configure environment variables in Vercel dashboard
+4. Deploy to production: `vercel --prod`
+
+⚠️ **Important**: SQLite database will NOT persist on Vercel. You must migrate to PostgreSQL or Firestore before deploying. See the deployment guide for details.
+
 ## Documentation
 
 ### **For Developers**
 - **[Developer Integration Guide](DEVELOPER-INTEGRATION-GUIDE.md)** - Complete setup, integration, and API reference
 - **[Environment Variables](ENVIRONMENT-VARIABLES.md)** - Firebase credentials and configuration
 - **[API Quick Reference](API-QUICK-REFERENCE.md)** - Fast lookup for GraphQL operations
+
+### **For Deployment**
+- **[Vercel Deployment Guide](VERCEL-DEPLOYMENT.md)** - Complete guide for deploying to Vercel
+- **[Deployment Checklist](DEPLOYMENT-CHECKLIST.md)** - Step-by-step deployment checklist
+- **[Environment Variables Template](.env.vercel.template)** - Template for Vercel environment variables
 
 ### **For Users**
 - **README.md** (this file) - Overview and quick start

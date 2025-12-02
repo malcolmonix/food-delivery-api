@@ -7,7 +7,9 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test": "node test-ci.js",
-    "test:ci": "npm start & sleep 10 && npm test && pkill -f 'node index.js'"
+    "test:ci": "npm start & sleep 10 && npm test && pkill -f 'node index.js'",
+    "build": "echo 'Build complete - serverless function ready'",
+    "vercel-build": "echo 'Vercel build complete'"
   },
   "keywords": [
     "graphql",

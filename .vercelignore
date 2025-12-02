@@ -1,0 +1,17 @@
+node_modules
+.git
+.github
+*.db
+test-*.js
+tests
+test-results
+*.md
+!README.md
+Dockerfile
+.dockerignore
+query-*.js
+seed-*.js
+apply-schema-fix.ps1
+schema-fix.md
+restaurants-data.json
+api-query-result.txt
