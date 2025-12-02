@@ -47,12 +47,12 @@ app.post('/notify-ready', async (req, res) => {
         try {
             let orderRecord = null;
             if (orderId) {
-                orderRecord = dbHelpers.getOrderById(orderId);
+                // Try lookup by internal ID
+                orderRecord = await dbHelpers.getOrderById(orderId);
                 if (!orderRecord) {
                     // try lookup by the public orderId column
                     try {
-                        const stmt = db.prepare('SELECT * FROM orders WHERE orderId = ?');
-                        orderRecord = stmt.get(orderId);
+                        orderRecord = await dbHelpers.getOrderByOrderId(orderId);
                     } catch (e) {
                         orderRecord = null;
                     }
@@ -62,7 +62,7 @@ app.post('/notify-ready', async (req, res) => {
             if (!orderRecord) return res.status(404).json({ error: 'Order not found or cannot verify ownership' });
 
             // orderRecord.restaurant may be a restaurant id; verify owner
-            const maybeRestaurant = dbHelpers.getRestaurantById(orderRecord.restaurant);
+            const maybeRestaurant = await dbHelpers.getRestaurantById(orderRecord.restaurant);
             if (!maybeRestaurant || maybeRestaurant.ownerId !== req.user.uid) {
                 return res.status(403).json({ error: 'Forbidden: Only the restaurant owner may call this endpoint' });
             }
@@ -136,17 +136,16 @@ app.get('/order-driver/:orderId', async (req, res) => {
         if (!orderId) return res.status(400).json({ error: 'orderId required' });
 
         // Lookup order by id or public orderId
-        let order = dbHelpers.getOrderById(orderId);
+        let order = await dbHelpers.getOrderById(orderId);
         if (!order) {
             try {
-                const stmt = db.prepare('SELECT * FROM orders WHERE orderId = ?');
-                order = stmt.get(orderId);
+                order = await dbHelpers.getOrderByOrderId(orderId);
             } catch (e) { order = null; }
         }
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
         // Verify caller is the restaurant owner
-        const maybeRestaurant = dbHelpers.getRestaurantById(order.restaurant);
+        const maybeRestaurant = await dbHelpers.getRestaurantById(order.restaurant);
         if (!maybeRestaurant || maybeRestaurant.ownerId !== req.user.uid) {
             return res.status(403).json({ error: 'Forbidden' });
         }
@@ -155,7 +154,7 @@ app.get('/order-driver/:orderId', async (req, res) => {
         if (!riderId) return res.json({ assigned: false });
 
         // Try to fetch rider profile from users table and Firestore riders collection
-        let riderProfile = dbHelpers.getUserByUid(riderId) || null;
+        let riderProfile = await dbHelpers.getUserByUid(riderId) || null;
         let riderExtra = null;
         try {
             const snap = await admin.firestore().collection('riders').doc(riderId).get();
@@ -165,7 +164,7 @@ app.get('/order-driver/:orderId', async (req, res) => {
         }
 
         // Count other active orders for the rider
-        const otherOrders = dbHelpers.getOrdersByRiderId(riderId) || [];
+        const otherOrders = await dbHelpers.getOrdersByRiderId(riderId) || [];
         const activeCount = otherOrders.filter(o => o.id !== order.id && !['DELIVERED', 'CANCELLED'].includes(o.orderStatus)).length;
 
         return res.json({

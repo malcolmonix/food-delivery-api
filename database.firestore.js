@@ -457,6 +457,17 @@ const dbHelpers = {
         return { id: doc.id, ...doc.data() };
     },
 
+    async getOrderByOrderId(orderId) {
+        const snapshot = await db.collection('orders')
+            .where('orderId', '==', orderId)
+            .limit(1)
+            .get();
+
+        if (snapshot.empty) return null;
+        const doc = snapshot.docs[0];
+        return { id: doc.id, ...doc.data() };
+    },
+
     async getOrdersByRiderId(riderId) {
         const snapshot = await db.collection('orders')
             .where('riderId', '==', riderId)
