@@ -10,9 +10,9 @@ const admin = require('firebase-admin');
 
 // Check if we're in a CI environment or missing credentials
 const isCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
-const hasValidCredentials = process.env.FIREBASE_PRIVATE_KEY && 
-                           process.env.FIREBASE_CLIENT_EMAIL && 
-                           process.env.FIREBASE_PROJECT_ID;
+const hasValidCredentials = process.env.FIREBASE_PRIVATE_KEY &&
+  process.env.FIREBASE_CLIENT_EMAIL &&
+  process.env.FIREBASE_PROJECT_ID;
 
 console.log('Environment check:');
 console.log('- CI Environment:', isCI);
@@ -20,6 +20,7 @@ console.log('- Valid credentials:', hasValidCredentials);
 
 let admin_instance = null;
 let db = null;
+let bucket = null;
 
 if (hasValidCredentials) {
   // Initialize Firebase Admin SDK with real credentials
@@ -44,39 +45,53 @@ if (hasValidCredentials) {
       databaseURL: `https://${serviceAccount.project_id}-default-rtdb.firebaseio.com`
     });
   }
-  
+
   admin_instance = admin;
   db = admin.firestore();
-  console.log('✅ Firebase initialized successfully');
+
+  // Initialize Storage bucket
+  try {
+    bucket = admin.storage().bucket(`${serviceAccount.project_id}.appspot.com`);
+    console.log('✅ Firebase initialized successfully with Storage');
+  } catch (error) {
+    console.warn('⚠️  Firebase Storage initialization failed:', error.message);
+    console.log('✅ Firebase initialized successfully (without Storage)');
+  }
+  console.log('✅ Firebase initialized successfully with real credentials');
 } else {
-  console.log('⚠️  Firebase credentials missing - running in mock mode');
-  
-  // Create mock Firebase for CI/development environments
+  console.warn('⚠️  Running without Firebase credentials - using mock services');
+
+  // Mock admin for environments without credentials
   admin_instance = {
     auth: () => ({
-      verifyIdToken: async (token) => {
-        if (isCI) {
-          // Return mock user for CI tests
-          return { uid: 'test-user', email: 'test@example.com' };
-        }
-        throw new Error('Firebase not configured - please set environment variables');
-      }
+      createUser: async () => ({ uid: 'mock-uid', email: 'mock@example.com' }),
+      getUserByEmail: async () => ({ uid: 'mock-uid', email: 'mock@example.com' }),
+      verifyIdToken: async () => ({ uid: 'mock-uid' }),
+      createCustomToken: async () => 'mock-token'
+    }),
+    firestore: () => ({
+      collection: () => ({
+        doc: () => ({
+          get: async () => ({ exists: false, data: () => null }),
+          set: async () => ({ writeTime: new Date() }),
+          update: async () => ({ writeTime: new Date() }),
+          delete: async () => ({ writeTime: new Date() })
+        }),
+        add: async () => ({ id: 'mock-id' }),
+        where: () => ({
+          where: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+          get: async () => ({ empty: true, docs: [] })
+        }),
+        get: async () => ({ empty: true, docs: [] })
+      })
     })
   };
-  
-  db = {
-    collection: () => ({
-      doc: () => ({
-        get: async () => ({ exists: false, data: () => null }),
-        set: async () => ({ writeTime: new Date() }),
-        update: async () => ({ writeTime: new Date() }),
-        delete: async () => ({ writeTime: new Date() })
-      }),
-      add: async () => ({ id: 'mock-id' }),
-      where: () => ({ get: async () => ({ empty: true, docs: [] }) }),
-      get: async () => ({ empty: true, docs: [] })
-    })
-  };
+
+  // Mock Firestore
+  db = admin_instance.firestore();
+
+  // Mock bucket for environments without storage
+  bucket = null;
 }
 
-module.exports = { admin: admin_instance, db };
+module.exports = { admin: admin_instance, db, bucket };
