@@ -5,11 +5,13 @@ This is the Firebase-powered GraphQL API server for the ChopChop food delivery p
 ## Features
 
 - **GraphQL API**: Apollo Server with GraphQL schema
-- **Firebase Integration**: Firestore database for data persistence
+- **Firebase Firestore**: Cloud-based persistent database
+- **Firebase Authentication**: Secure user authentication
 - **Order Management**: Complete order placement and management system
 - **Payment Method Support**: Handles CASH (immediate confirmation) and electronic payments (CARD/WALLET/BANK)
 - **Order Status Tracking**: Complete order lifecycle with status history
 - **Real-time Updates**: Status changes with timestamps and notes
+- **Vercel Compatible**: Serverless deployment ready with persistent data
 
 ## Setup
 
@@ -85,7 +87,7 @@ PORT=4000
 
 ## Deployment
 
-This API can be deployed to Vercel as a serverless function. See the [Vercel Deployment Guide](VERCEL-DEPLOYMENT.md) for detailed instructions.
+This API is deployed to Vercel as a serverless function with **Firebase Firestore** for persistent data storage.
 
 **Quick Deploy:**
 1. Install Vercel CLI: `npm i -g vercel`
@@ -93,7 +95,7 @@ This API can be deployed to Vercel as a serverless function. See the [Vercel Dep
 3. Configure environment variables in Vercel dashboard
 4. Deploy to production: `vercel --prod`
 
-⚠️ **Important**: SQLite database will NOT persist on Vercel. You must migrate to PostgreSQL or Firestore before deploying. See the deployment guide for details.
+✅ **Production Ready**: Firestore migration complete - data persists across all requests!
 
 ## Documentation
 
@@ -104,8 +106,24 @@ This API can be deployed to Vercel as a serverless function. See the [Vercel Dep
 
 ### **For Deployment**
 - **[Vercel Deployment Guide](VERCEL-DEPLOYMENT.md)** - Complete guide for deploying to Vercel
+- **[Firestore Migration Guide](FIRESTORE-MIGRATION.md)** - Database migration from SQLite to Firestore
 - **[Deployment Checklist](DEPLOYMENT-CHECKLIST.md)** - Step-by-step deployment checklist
 - **[Environment Variables Template](.env.vercel.template)** - Template for Vercel environment variables
 
 ### **For Users**
 - **README.md** (this file) - Overview and quick start
+
+## Database
+
+**Current**: Firebase Firestore (Cloud NoSQL database)  
+**Previous**: SQLite (migrated on 2025-12-02)
+
+All data is now stored in Firestore collections:
+- `users` - User profiles
+- `addresses` - User addresses
+- `restaurants` - Restaurant information
+- `menu_items` - Menu items
+- `menu_categories` - Menu categories
+- `orders` - Order data
+
+Data persists across all deployments and function invocations.

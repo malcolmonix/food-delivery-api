@@ -4,7 +4,7 @@ const { ApolloServer } = require('apollo-server-express');
 const graphqlUploadExpress = require('graphql-upload/graphqlUploadExpress.js');
 const { typeDefs, resolvers } = require('../schema');
 const { admin } = require('../firebase');
-const { dbHelpers, db } = require('../database.vercel');
+const { dbHelpers } = require('../database.firestore');
 
 const app = express();
 

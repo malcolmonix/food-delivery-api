@@ -1,5 +1,5 @@
 const { gql } = require('apollo-server-express');
-const { dbHelpers, generateId } = require('./database');
+const { dbHelpers, generateId } = require('./database.firestore');
 const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -349,7 +349,7 @@ const resolvers = {
      */
     orders: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const orders = dbHelpers.getOrdersByUserId(user.uid);
       return orders.map(order => ({
         ...order,
@@ -363,7 +363,7 @@ const resolvers = {
      */
     order: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const order = dbHelpers.getOrderById(id);
       if (!order) return null;
       if (order.userId !== user.uid) throw new Error('Access denied');
@@ -380,7 +380,7 @@ const resolvers = {
      */
     addresses: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const addresses = dbHelpers.getAddressesByUserId(user.uid);
       return addresses.map(addr => ({
         ...addr,
@@ -392,7 +392,7 @@ const resolvers = {
      */
     address: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const address = dbHelpers.getAddressById(id);
       if (!address) return null;
       if (address.userId !== user.uid) throw new Error('Access denied');
@@ -613,10 +613,10 @@ const resolvers = {
       try {
         // Get user from Firebase Auth by email
         const userRecord = await admin.auth().getUserByEmail(email);
-        
+
         // Generate custom token
         const token = await admin.auth().createCustomToken(userRecord.uid);
-        
+
         // Get user profile from SQLite
         const user = await getUserById(userRecord.uid);
 
@@ -639,7 +639,7 @@ const resolvers = {
         if (!user) {
           // Get user from Firebase Auth
           const userRecord = await admin.auth().getUser(uid);
-          
+
           // Create profile in SQLite
           const userData = {
             uid: userRecord.uid,
@@ -651,7 +651,7 @@ const resolvers = {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           };
-          
+
           dbHelpers.createUser(userData);
           user = await getUserById(uid);
         }
@@ -698,7 +698,7 @@ const resolvers = {
         if (displayName !== undefined) authUpdateData.displayName = displayName;
         if (phoneNumber !== undefined) authUpdateData.phoneNumber = phoneNumber;
         if (photoURL !== undefined) authUpdateData.photoURL = photoURL;
-        
+
         await admin.auth().updateUser(user.uid, authUpdateData);
 
         return await getUserById(user.uid);
@@ -1744,10 +1744,10 @@ const resolvers = {
  */
 async function uploadFileToStorage(file, folder = 'images') {
   const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '7423450f81b14c198b65e9d2ba033c5b';
-  
+
   try {
     const { createReadStream, filename, mimetype } = await file;
-    
+
     // Validate file type
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
     if (!allowedTypes.includes(mimetype)) {
@@ -1757,13 +1757,13 @@ async function uploadFileToStorage(file, folder = 'images') {
     // Read file stream into buffer
     const stream = createReadStream();
     const chunks = [];
-    
+
     await new Promise((resolve, reject) => {
       stream.on('data', (chunk) => chunks.push(chunk));
       stream.on('error', reject);
       stream.on('end', resolve);
     });
-    
+
     const buffer = Buffer.concat(chunks);
     const base64Image = buffer.toString('base64');
 

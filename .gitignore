@@ -9,3 +9,8 @@ node_modules/
 *.db
 *.db-journal
 .vercel
+
+# Old SQLite files (migrated to Firestore)
+database.js
+database.vercel.js
+food-delivery.db
