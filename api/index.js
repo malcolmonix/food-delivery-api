@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const cors = require('cors');
 const { ApolloServer } = require('apollo-server-express');
 const graphqlUploadExpress = require('graphql-upload/graphqlUploadExpress.js');
 const { typeDefs, resolvers } = require('../schema');
@@ -7,6 +8,29 @@ const { admin } = require('../firebase');
 const { dbHelpers } = require('../database.firestore');
 
 const app = express();
+
+// CORS configuration
+const allowedOrigins = (process.env.CORS_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
+const defaultOrigins = [
+    'http://localhost:3000',
+    'http://localhost:9002',
+    'http://localhost:9010',
+    'http://localhost:9011',
+    'http://localhost:4000',
+    'https://deliver-mi.vercel.app',
+    'https://chopchop.vercel.app',
+    'https://menuverse.vercel.app'
+];
+
+const originList = allowedOrigins.length ? allowedOrigins : defaultOrigins;
+
+app.use(cors({
+    origin: originList,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-api-key', 'x-api_key', 'x-api']
+}));
+app.options('*', cors());
 
 // Authentication middleware using Firebase Auth
 const authMiddleware = async (req, res, next) => {
