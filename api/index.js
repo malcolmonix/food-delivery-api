@@ -18,6 +18,7 @@ const defaultOrigins = [
     'http://localhost:9011',
     'http://localhost:4000',
     'https://deliver-mi.vercel.app',
+    'https://rider-mi.vercel.app',
     'https://chopchop.vercel.app',
     'https://menuverse.vercel.app'
 ];
