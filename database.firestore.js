@@ -11,6 +11,10 @@ const db = admin.firestore();
 
 console.log('🔥 Firestore database initialized');
 
+// In-memory ride storage for mock Firestore mode
+// This is a workaround since mock Firestore .get() always returns null
+const inMemoryRides = [];
+
 /**
  * Helper function to generate unique ID
  */
@@ -54,14 +58,20 @@ const dbHelpers = {
     },
 
     async getUserByEmail(email) {
-        const snapshot = await db.collection('users')
-            .where('email', '==', email)
-            .limit(1)
-            .get();
+        try {
+            const snapshot = await db.collection('users')
+                .where('email', '==', email)
+                .limit(1)
+                .get();
 
-        if (snapshot.empty) return null;
-        const doc = snapshot.docs[0];
-        return { id: doc.id, ...doc.data() };
+            if (!snapshot.empty) {
+                const doc = snapshot.docs[0];
+                return { id: doc.id, ...doc.data() };
+            }
+        } catch (error) {
+            console.log('⚠️  Firestore query failed for getUserByEmail');
+        }
+        return null;
     },
 
     async updateUser(uid, updates) {
@@ -458,14 +468,20 @@ const dbHelpers = {
     },
 
     async getOrderByOrderId(orderId) {
-        const snapshot = await db.collection('orders')
-            .where('orderId', '==', orderId)
-            .limit(1)
-            .get();
+        try {
+            const snapshot = await db.collection('orders')
+                .where('orderId', '==', orderId)
+                .limit(1)
+                .get();
 
-        if (snapshot.empty) return null;
-        const doc = snapshot.docs[0];
-        return { id: doc.id, ...doc.data() };
+            if (!snapshot.empty) {
+                const doc = snapshot.docs[0];
+                return { id: doc.id, ...doc.data() };
+            }
+        } catch (error) {
+            console.log('⚠️  Firestore query failed for getOrderByOrderId');
+        }
+        return null;
     },
 
     async getOrdersByRiderId(riderId) {
@@ -480,13 +496,14 @@ const dbHelpers = {
     async getAvailableOrders() {
         const snapshot = await db.collection('orders')
             .where('orderStatus', '==', 'READY')
-            .orderBy('createdAt', 'asc')
             .get();
 
-        // Filter out orders that already have a rider
+        // Filter out orders that already have a rider and sort by createdAt in-memory
+        // (avoiding need for composite index)
         return snapshot.docs
             .map(doc => ({ id: doc.id, ...doc.data() }))
-            .filter(order => !order.riderId || order.riderId === '');
+            .filter(order => !order.riderId || order.riderId === '')
+            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     },
 
     async updateOrder(id, updates) {
@@ -499,6 +516,225 @@ const dbHelpers = {
         await orderRef.update({
             ...cleanUpdates,
             updatedAt: new Date().toISOString()
+        });
+    },
+
+    // ==================== RIDE OPERATIONS ====================
+
+    async createRide(rideData) {
+        const id = generateId();
+        const rideId = `RIDE-${Date.now()}`;
+        const rideRef = db.collection('rides').doc(id);
+
+        const rideDoc = {
+            id,
+            rideId,
+            userId: rideData.userId,
+            riderId: rideData.riderId || null,
+            pickupAddress: rideData.pickupAddress,
+            pickupLat: rideData.pickupLat,
+            pickupLng: rideData.pickupLng,
+            dropoffAddress: rideData.dropoffAddress,
+            dropoffLat: rideData.dropoffLat,
+            dropoffLng: rideData.dropoffLng,
+            status: rideData.status || 'REQUESTED',
+            fare: rideData.fare,
+            distance: rideData.distance,
+            duration: rideData.duration,
+            paymentMethod: rideData.paymentMethod || null,
+            rating: rideData.rating || null,
+            feedback: rideData.feedback || null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+
+        await rideRef.set(rideDoc);
+
+        // Also write to real-time collection for DeliverMi
+        await db.collection('customer-rides').doc(id).set(rideDoc);
+
+        // Store in-memory for mock Firestore mode (workaround for .get() returning null)
+        inMemoryRides.push(rideDoc);
+        console.log('📦 Stored ride in-memory. Total rides:', inMemoryRides.length);
+
+        return rideDoc; // Return the full ride object instead of just ID
+    },
+
+    async getRideById(id) {
+        const rideRef = db.collection('rides').doc(id);
+        const doc = await rideRef.get();
+
+        if (!doc.exists) {
+            // Fallback to in-memory storage for mock Firestore
+            const memoryRide = inMemoryRides.find(r => r.id === id);
+            if (memoryRide) {
+                console.log('🔍 Retrieved ride from in-memory storage:', id);
+                return memoryRide;
+            }
+            return null;
+        }
+        return { id: doc.id, ...doc.data() };
+    },
+
+    async getRideByRideId(rideId) {
+        try {
+            const snapshot = await db.collection('rides')
+                .where('rideId', '==', rideId)
+                .limit(1)
+                .get();
+
+            if (!snapshot.empty) {
+                const doc = snapshot.docs[0];
+                return { id: doc.id, ...doc.data() };
+            }
+        } catch (error) {
+            // Mock Firestore doesn't support .where().limit()
+            console.log('⚠️  Firestore query failed, using in-memory storage');
+        }
+        
+        // Fallback to in-memory storage for mock Firestore
+        const memoryRide = inMemoryRides.find(r => r.rideId === rideId);
+        if (memoryRide) {
+            console.log('🔍 Retrieved ride by rideId from in-memory storage:', rideId);
+            return memoryRide;
+        }
+        return null;
+    },
+
+    async getRidesByUserId(userId) {
+        try {
+            const snapshot = await db.collection('rides')
+                .where('userId', '==', userId)
+                .get();
+
+            if (!snapshot.empty) {
+                return snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            }
+
+            // Fallback to in-memory storage for mock Firestore
+            const userRides = inMemoryRides
+                .filter(ride => ride.userId === userId)
+                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            
+            console.log('🔍 Retrieved rides by userId from in-memory storage:', userRides.length);
+            return userRides;
+        } catch (error) {
+            console.error('Error getting rides by user:', error);
+            return [];
+        }
+    },
+
+    async getRidesByRiderId(riderId) {
+        try {
+            const snapshot = await db.collection('rides')
+                .where('riderId', '==', riderId)
+                .get();
+
+            if (!snapshot.empty) {
+                return snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            }
+
+            // Fallback to in-memory storage for mock Firestore
+            const riderRides = inMemoryRides
+                .filter(ride => ride.riderId === riderId)
+                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            
+            console.log('🔍 Retrieved rides by riderId from in-memory storage:', riderRides.length);
+            return riderRides;
+        } catch (error) {
+            console.error('Error getting rides by rider:', error);
+            return [];
+        }
+    },
+
+    async getAvailableRides() {
+        try {
+            const snapshot = await db.collection('rides')
+                .where('status', '==', 'REQUESTED')
+                .get();
+
+            // Try Firestore first
+            if (!snapshot.empty) {
+                return snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .filter(ride => !ride.riderId || ride.riderId === '')
+                    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+            }
+
+            // Fallback to in-memory storage for mock Firestore
+            const availableRides = inMemoryRides
+                .filter(ride => ride.status === 'REQUESTED' && (!ride.riderId || ride.riderId === ''))
+                .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+            console.log('🔍 Retrieved available rides from in-memory storage:', availableRides.length);
+            return availableRides;
+        } catch (error) {
+            console.error('Error getting available rides:', error);
+            return [];
+        }
+    },
+
+    async updateRide(id, updates) {
+        const rideRef = db.collection('rides').doc(id);
+
+        const { id: _, ...cleanUpdates } = updates;
+
+        if (Object.keys(cleanUpdates).length === 0) return;
+
+        const updateData = {
+            ...cleanUpdates,
+            updatedAt: new Date().toISOString()
+        };
+
+        await rideRef.update(updateData);
+
+        // Also update real-time collection for DeliverMi
+        await db.collection('customer-rides').doc(id).update(updateData);
+
+        // Update in-memory storage for mock Firestore
+        const rideIndex = inMemoryRides.findIndex(r => r.id === id);
+        if (rideIndex !== -1) {
+            inMemoryRides[rideIndex] = {
+                ...inMemoryRides[rideIndex],
+                ...updateData
+            };
+            console.log('📝 Updated ride in-memory storage:', id, 'Status:', cleanUpdates.status || 'N/A');
+            return inMemoryRides[rideIndex]; // Return updated ride
+        }
+        
+        // If not in memory, try to get from Firestore
+        return this.getRideById(id);
+    },
+
+    async updateUserLocation(uid, latitude, longitude) {
+        const userRef = db.collection('users').doc(uid);
+
+        await userRef.update({
+            latitude,
+            longitude,
+            lastLocationUpdate: new Date().toISOString()
+        });
+
+        // Also update rider-locations collection for real-time tracking
+        await db.collection('rider-locations').doc(uid).set({
+            latitude,
+            longitude,
+            lat: latitude,  // For backward compatibility
+            lng: longitude, // For backward compatibility
+            updatedAt: new Date().toISOString()
+        }, { merge: true });
+    },
+
+    async updateRiderStatus(uid, isOnline) {
+        const userRef = db.collection('users').doc(uid);
+
+        await userRef.update({
+            isOnline,
+            lastStatusUpdate: new Date().toISOString()
         });
     },
 };

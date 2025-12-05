@@ -4,7 +4,7 @@ const { ApolloServer } = require('apollo-server-express');
 const graphqlUploadExpress = require('graphql-upload/graphqlUploadExpress.js');
 const { typeDefs, resolvers } = require('./schema');
 const { admin } = require('./firebase');
-const { dbHelpers, db } = require('./database');
+const { dbHelpers, db } = require('./database.firestore');
 
 async function startServer() {
   const app = express();
@@ -29,7 +29,7 @@ async function startServer() {
   };
 
   app.use(authMiddleware);
-  
+
   // File upload middleware (must be before Apollo middleware)
   app.use(graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 }));
   // JSON body parsing for REST endpoints
@@ -167,7 +167,7 @@ async function startServer() {
 
       // Count other active orders for the rider
       const otherOrders = dbHelpers.getOrdersByRiderId(riderId) || [];
-      const activeCount = otherOrders.filter(o => o.id !== order.id && !['DELIVERED','CANCELLED'].includes(o.orderStatus)).length;
+      const activeCount = otherOrders.filter(o => o.id !== order.id && !['DELIVERED', 'CANCELLED'].includes(o.orderStatus)).length;
 
       return res.json({
         assigned: true,

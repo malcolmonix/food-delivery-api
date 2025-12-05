@@ -16,6 +16,9 @@ const typeDefs = gql`
     displayName: String
     phoneNumber: String
     photoURL: String
+    latitude: Float
+    longitude: Float
+    isOnline: Boolean
     addresses: [Address!]!
     createdAt: String!
     updatedAt: String!
@@ -139,6 +142,53 @@ const typeDefs = gql`
     note: String
   }
 
+  type Ride {
+    id: ID!
+    rideId: String!
+    userId: String!
+    riderId: String
+    pickupAddress: String!
+    pickupLat: Float!
+    pickupLng: Float!
+    dropoffAddress: String!
+    dropoffLat: Float!
+    dropoffLng: Float!
+    status: String!
+    fare: Float!
+    distance: Float!
+    duration: Int!
+    paymentMethod: String
+    rating: Int
+    feedback: String
+    deliveryCode: String
+    rider: RiderInfo
+    createdAt: String!
+    updatedAt: String!
+  }
+
+  type RiderInfo {
+    id: ID!
+    displayName: String
+    phoneNumber: String
+    latitude: Float
+    longitude: Float
+    photoURL: String
+  }
+
+  input RideInput {
+    pickupAddress: String!
+    pickupLat: Float!
+    pickupLng: Float!
+    dropoffAddress: String!
+    dropoffLat: Float!
+    dropoffLng: Float!
+    fare: Float!
+    distance: Float
+    duration: Int
+    paymentMethod: String
+    vehicleType: String
+  }
+
   type Query {
     me: User
     orders: [Order!]!
@@ -155,6 +205,11 @@ const typeDefs = gql`
     availableOrders: [Order!]!
     # Rider-specific order view
     riderOrder(id: ID!): Order
+    # Ride queries
+    ride(id: ID!): Ride
+    myRides: [Ride!]!
+    availableRides: [Ride!]!
+    riderRides: [Ride!]!
   }
 
   type Mutation {
@@ -283,6 +338,15 @@ const typeDefs = gql`
     riderUpdateOrderStatus(orderId: ID!, status: String!, code: String): Order!
     riderReportNotReady(orderId: ID!, waitedMinutes: Int): Boolean!
     riderCancelOrder(orderId: ID!, reason: String): Boolean!
+    # Ride booking mutations
+    requestRide(input: RideInput!): Ride!
+    acceptRide(rideId: ID!): Ride!
+    updateRideStatus(rideId: ID!, status: String!, confirmCode: String): Ride!
+    setDeliveryCode(rideId: ID!, code: String!): Ride!
+    updateRiderLocation(latitude: Float!, longitude: Float!): User!
+    updateRiderStatus(isOnline: Boolean!): User!
+    cancelRide(rideId: ID!, reason: String): Ride!
+    rateRide(rideId: ID!, rating: Int!, feedback: String): Ride!
   }
 
   input OpeningHourInput {
@@ -516,7 +580,7 @@ const resolvers = {
      */
     availableOrders: async () => {
       try {
-        const orders = dbHelpers.getAvailableOrders();
+        const orders = await dbHelpers.getAvailableOrders();
         return orders.map(order => ({
           ...order,
           orderItems: JSON.parse(order.orderItems),
@@ -549,6 +613,68 @@ const resolvers = {
         console.error('riderOrder error', e.message || e);
         throw new Error('Failed to fetch order');
       }
+    },
+    
+    /**
+     * Get single ride by ID
+     */
+    ride: async (_, { id }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      const ride = await dbHelpers.getRideById(id);
+      if (!ride) return null;
+      
+      // Only allow user or rider to view
+      if (ride.userId !== user.uid && ride.riderId !== user.uid) {
+        throw new Error('Access denied');
+      }
+      
+      // Add rider info if ride is accepted
+      if (ride.riderId) {
+        const rider = await dbHelpers.getUserByUid(ride.riderId);
+        if (rider) {
+          ride.rider = {
+            id: rider.uid,
+            displayName: rider.displayName,
+            phoneNumber: rider.phoneNumber,
+            latitude: rider.latitude,
+            longitude: rider.longitude,
+            photoURL: rider.photoURL,
+          };
+        }
+      }
+      
+      return ride;
+    },
+    
+    /**
+     * Get all rides for authenticated user
+     */
+    myRides: async (_, __, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      const rides = await dbHelpers.getRidesByUserId(user.uid);
+      return rides;
+    },
+    
+    /**
+     * Get available rides for riders to accept
+     */
+    availableRides: async (_, __, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      const rides = await dbHelpers.getAvailableRides();
+      return rides;
+    },
+    
+    /**
+     * Get rides assigned to authenticated rider
+     */
+    riderRides: async (_, __, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      const rides = await dbHelpers.getRidesByRiderId(user.uid);
+      return rides;
     },
   },
   Mutation: {
@@ -868,12 +994,21 @@ const resolvers = {
         try {
           if (admin && admin.messaging && admin.firestore) {
             const firestore = admin.firestore();
-            const ridersSnapshot = await firestore.collection('riders').get();
+            // Only get riders who are available/online and have FCM tokens
+            const ridersSnapshot = await firestore.collection('riders')
+              .where('available', '==', true)
+              .get();
+            
             const tokens = [];
             ridersSnapshot.forEach(doc => {
               const data = doc.data();
-              if (data && data.fcmToken) tokens.push(data.fcmToken);
+              if (data && data.fcmToken) {
+                console.log(`📍 Found available rider: ${doc.id}`);
+                tokens.push(data.fcmToken);
+              }
             });
+
+            console.log(`📢 Sending order notification to ${tokens.length} available riders`);
 
             if (tokens.length) {
               const deepLink = `${DELIVERMI_URL.replace(/\/$/, '')}/order/${encodeURIComponent(id.toString())}`;
@@ -891,10 +1026,13 @@ const resolvers = {
                 const chunk = tokens.slice(i, i + chunkSize);
                 try {
                   await admin.messaging().sendMulticast({ tokens: chunk, ...message });
+                  console.log(`✅ Sent order notification to ${chunk.length} riders`);
                 } catch (sendErr) {
                   console.warn('FCM sendMulticast failed for chunk:', sendErr.message || sendErr);
                 }
               }
+            } else {
+              console.log('⚠️  No available riders online to notify');
             }
           }
         } catch (notifyErr) {
@@ -1672,6 +1810,356 @@ const resolvers = {
       } catch (e) {
         console.error('riderCancelOrder error', e.message || e);
         throw new Error('Failed to cancel order');
+      }
+    },
+
+    /**
+     * Request a new ride
+     */
+    requestRide: async (_, { input }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        const rideData = {
+          userId: user.uid,
+          pickupAddress: input.pickupAddress,
+          pickupLat: input.pickupLat,
+          pickupLng: input.pickupLng,
+          dropoffAddress: input.dropoffAddress,
+          dropoffLat: input.dropoffLat,
+          dropoffLng: input.dropoffLng,
+          fare: input.fare,
+          distance: input.distance,
+          duration: input.duration,
+          paymentMethod: input.paymentMethod || 'CASH',
+          vehicleType: input.vehicleType || 'Standard',
+          status: 'REQUESTED',
+        };
+        
+        const ride = await dbHelpers.createRide(rideData);
+        
+        // Notify available riders via FCM (skip if in mock mode)
+        if (admin && admin.messaging && admin.firestore) {
+          try {
+            const firestore = admin.firestore();
+            // Query riders collection for riders who are online (available == true) and have FCM tokens
+            const ridersSnapshot = await firestore.collection('riders')
+              .where('available', '==', true)
+              .get();
+            
+            const tokens = [];
+            ridersSnapshot.forEach(doc => {
+              const data = doc.data();
+              if (data && data.fcmToken) {
+                console.log(`📍 Found online rider with FCM token: ${doc.id}`);
+                tokens.push(data.fcmToken);
+              }
+            });
+            
+            console.log(`📢 Sending ride notification to ${tokens.length} riders`);
+
+            if (tokens.length > 0) {
+              const message = {
+                notification: {
+                  title: 'New Ride Request',
+                  body: `${input.pickupAddress} → ${input.dropoffAddress} - $${input.fare}`,
+                },
+                data: {
+                  type: 'NEW_RIDE',
+                  rideId: ride.rideId,
+                  url: `${DELIVERMI_URL}/ride/${ride.id}`,
+                },
+              };
+              
+              const chunkSize = 500;
+              for (let i = 0; i < tokens.length; i += chunkSize) {
+                const chunk = tokens.slice(i, i + chunkSize);
+                try {
+                  await admin.messaging().sendMulticast({ tokens: chunk, ...message });
+                  console.log(`✅ Sent notification to ${chunk.length} riders`);
+                } catch (err) {
+                  console.error('Failed to send notification chunk:', err.message);
+                }
+              }
+            } else {
+              console.log('⚠️  No online riders available to notify');
+            }
+          } catch (notifyErr) {
+            console.error('Failed to notify riders:', notifyErr);
+            // Continue even if notifications fail
+          }
+        }
+        
+        return ride;
+      } catch (e) {
+        console.error('requestRide error:', e);
+        throw new Error('Failed to request ride: ' + e.message);
+      }
+    },
+
+    /**
+     * Accept a ride request
+     */
+    acceptRide: async (_, { rideId }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        console.log('🎯 acceptRide called with rideId:', rideId, 'by user:', user.uid);
+        
+        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        console.log('🔍 Found ride:', ride ? ride.id : 'null');
+        
+        if (!ride) throw new Error('Ride not found');
+        
+        if (ride.riderId) throw new Error('Ride already accepted');
+        if (ride.status !== 'REQUESTED') throw new Error('Ride is not available');
+        
+        console.log('✅ Ride is available, updating...');
+        
+        const updatedRide = await dbHelpers.updateRide(ride.id, {
+          riderId: user.uid,
+          status: 'ACCEPTED',
+        });
+        
+        console.log('✅ Ride updated:', updatedRide ? updatedRide.id : 'null');
+        
+        if (!updatedRide) {
+          console.error('❌ updateRide returned null');
+          throw new Error('Failed to update ride');
+        }
+        
+        // Add rider info
+        const rider = await dbHelpers.getUserByUid(user.uid);
+        console.log('👤 Got rider info:', rider ? rider.uid : 'null');
+        
+        if (rider) {
+          updatedRide.rider = {
+            id: rider.uid,
+            displayName: rider.displayName,
+            phoneNumber: rider.phoneNumber,
+            latitude: rider.latitude,
+            longitude: rider.longitude,
+            photoURL: rider.photoURL,
+          };
+        }
+        
+        console.log('🎉 Returning updated ride:', updatedRide.id);
+        return updatedRide;
+      } catch (e) {
+        console.error('❌ acceptRide error:', e.message || e);
+        throw new Error(e.message || 'Failed to accept ride');
+      }
+    },
+
+    /**
+     * Update ride status
+     */
+    updateRideStatus: async (_, { rideId, status, confirmCode }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        if (!ride) throw new Error('Ride not found');
+        
+        // Only rider or user can update
+        if (ride.riderId !== user.uid && ride.userId !== user.uid) {
+          throw new Error('Access denied');
+        }
+        
+        // If completing ride, validate confirmation code if provided
+        if (status === 'COMPLETED' && confirmCode) {
+          // Validate confirmation code matches the one set by customer
+          console.log('🔐 Code validation:', {
+            rideId: ride.rideId,
+            storedCode: ride.deliveryCode,
+            providedCode: confirmCode,
+            match: ride.deliveryCode === confirmCode
+          });
+          
+          if (!ride.deliveryCode) {
+            throw new Error('No delivery code found. Please ask the customer to generate a code first.');
+          }
+          
+          if (ride.deliveryCode !== confirmCode) {
+            throw new Error(`Invalid confirmation code. Expected: ${ride.deliveryCode}, Got: ${confirmCode}`);
+          }
+          console.log('✅ Ride completion confirmed with correct code:', confirmCode);
+        }
+        
+        await dbHelpers.updateRide(ride.id, { status });
+        
+        return await dbHelpers.getRideById(ride.id);
+      } catch (e) {
+        console.error('updateRideStatus error:', e);
+        throw new Error(e.message || 'Failed to update ride status');
+      }
+    },
+
+    /**
+     * Set delivery confirmation code (customer generates and saves this)
+     */
+    setDeliveryCode: async (_, { rideId, code }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        if (!ride) throw new Error('Ride not found');
+        
+        // Only the customer (userId) can set the delivery code
+        if (ride.userId !== user.uid) {
+          throw new Error('Only the customer can set the delivery code');
+        }
+        
+        console.log('Setting delivery code for ride:', rideId, 'Code:', code);
+        await dbHelpers.updateRide(ride.id, { deliveryCode: code });
+        
+        return await dbHelpers.getRideById(ride.id);
+      } catch (e) {
+        console.error('setDeliveryCode error:', e);
+        throw new Error(e.message || 'Failed to set delivery code');
+      }
+    },
+
+    /**
+     * Update rider location
+     */
+    updateRiderLocation: async (_, { latitude, longitude }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        await dbHelpers.updateUserLocation(user.uid, latitude, longitude);
+        
+        const updatedUser = await dbHelpers.getUserByUid(user.uid);
+        
+        if (!updatedUser) {
+          // Return basic user info if database lookup fails
+          return {
+            id: user.uid,
+            uid: user.uid,
+            email: user.email || '',
+            displayName: user.name || user.displayName || null,
+            phoneNumber: user.phoneNumber || null,
+            photoURL: user.photoURL || null,
+            latitude,
+            longitude,
+            addresses: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+        }
+        
+        return {
+          id: updatedUser.uid || updatedUser.id,
+          uid: updatedUser.uid || updatedUser.id,
+          email: updatedUser.email,
+          displayName: updatedUser.displayName,
+          phoneNumber: updatedUser.phoneNumber,
+          photoURL: updatedUser.photoURL,
+          latitude,
+          longitude,
+          addresses: [],
+          createdAt: updatedUser.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+      } catch (e) {
+        console.error('updateRiderLocation error:', e);
+        throw new Error('Failed to update location: ' + e.message);
+      }
+    },
+
+    /**
+     * Update rider online status
+     */
+    updateRiderStatus: async (_, { isOnline }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        await dbHelpers.updateRiderStatus(user.uid, isOnline);
+        
+        const updatedUser = await dbHelpers.getUserByUid(user.uid);
+        
+        if (!updatedUser) {
+          // Return basic user info if database lookup fails
+          return {
+            id: user.uid,
+            uid: user.uid,
+            email: user.email || '',
+            displayName: user.name || user.displayName || null,
+            phoneNumber: user.phoneNumber || null,
+            photoURL: user.photoURL || null,
+            isOnline,
+            addresses: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+        }
+        
+        return {
+          id: updatedUser.uid || updatedUser.id,
+          uid: updatedUser.uid || updatedUser.id,
+          email: updatedUser.email,
+          displayName: updatedUser.displayName,
+          phoneNumber: updatedUser.phoneNumber,
+          photoURL: updatedUser.photoURL,
+          isOnline,
+          addresses: [],
+          createdAt: updatedUser.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+      } catch (e) {
+        console.error('updateRiderStatus error:', e);
+        throw new Error('Failed to update status: ' + e.message);
+      }
+    },
+
+    /**
+     * Cancel a ride
+     */
+    cancelRide: async (_, { rideId, reason }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        if (!ride) throw new Error('Ride not found');
+        
+        // Only user can cancel
+        if (ride.userId !== user.uid) throw new Error('Access denied');
+        
+        await dbHelpers.updateRide(ride.id, {
+          status: 'CANCELLED',
+        });
+        
+        return await dbHelpers.getRideById(ride.id);
+      } catch (e) {
+        console.error('cancelRide error:', e);
+        throw new Error('Failed to cancel ride');
+      }
+    },
+
+    /**
+     * Rate a completed ride
+     */
+    rateRide: async (_, { rideId, rating, feedback }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      try {
+        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        if (!ride) throw new Error('Ride not found');
+        
+        // Only user can rate
+        if (ride.userId !== user.uid) throw new Error('Access denied');
+        
+        if (ride.status !== 'COMPLETED') throw new Error('Can only rate completed rides');
+        
+        await dbHelpers.updateRide(ride.id, {
+          rating,
+          feedback: feedback || null,
+        });
+        
+        return await dbHelpers.getRideById(ride.id);
+      } catch (e) {
+        console.error('rateRide error:', e);
+        throw new Error('Failed to rate ride');
       }
     },
 
