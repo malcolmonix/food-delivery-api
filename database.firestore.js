@@ -11,9 +11,7 @@ const db = admin.firestore();
 
 console.log('🔥 Firestore database initialized');
 
-// In-memory ride storage for mock Firestore mode
-// This is a workaround since mock Firestore .get() always returns null
-const inMemoryRides = [];
+
 
 /**
  * Helper function to generate unique ID
@@ -103,6 +101,8 @@ const dbHelpers = {
             state: addressData.state,
             zipCode: addressData.zipCode,
             country: addressData.country,
+            latitude: addressData.latitude || null,
+            longitude: addressData.longitude || null,
             isDefault: addressData.isDefault || false,
             createdAt: addressData.createdAt,
             updatedAt: addressData.updatedAt
@@ -443,10 +443,16 @@ const dbHelpers = {
             couponCode: orderData.couponCode || null,
             statusHistory: orderData.statusHistory || [],
             createdAt: orderData.createdAt,
-            updatedAt: orderData.updatedAt
+            updatedAt: orderData.updatedAt,
+            customer: orderData.customer || null
         };
 
         await orderRef.set(orderDoc);
+
+        // Also write to customer-orders for ChopChop client access
+        await db.collection('customer-orders').doc(id).set(orderDoc);
+        console.log('✅ Created order in Firestore:', id);
+
         return id;
     },
 
@@ -553,27 +559,42 @@ const dbHelpers = {
         // Also write to real-time collection for DeliverMi
         await db.collection('customer-rides').doc(id).set(rideDoc);
 
-        // Store in-memory for mock Firestore mode (workaround for .get() returning null)
-        inMemoryRides.push(rideDoc);
-        console.log('📦 Stored ride in-memory. Total rides:', inMemoryRides.length);
+        console.log('✅ Created ride in Firestore:', id);
 
-        return rideDoc; // Return the full ride object instead of just ID
+        return rideDoc;
     },
 
     async getRideById(id) {
-        const rideRef = db.collection('rides').doc(id);
-        const doc = await rideRef.get();
+        try {
+            const rideRef = db.collection('rides').doc(id);
+            const doc = await rideRef.get();
 
-        if (!doc.exists) {
-            // Fallback to in-memory storage for mock Firestore
-            const memoryRide = inMemoryRides.find(r => r.id === id);
-            if (memoryRide) {
-                console.log('🔍 Retrieved ride from in-memory storage:', id);
-                return memoryRide;
+            if (!doc.exists) {
+                console.log(`⚠️ Ride ${id} not found in 'rides' collection. Checking backup...`);
+
+                // Try customer-rides as backup (self-healing)
+                try {
+                    const crRef = db.collection('customer-rides').doc(id);
+                    const crDoc = await crRef.get();
+                    if (crDoc.exists) {
+                        console.log(`♻️ Recovered ride ${id} from 'customer-rides' backup.`);
+                        const data = crDoc.data();
+
+                        // Async restore to main collection
+                        rideRef.set(data).catch(e => console.error('Failed to restore ride:', e));
+
+                        return { id: crDoc.id, ...data };
+                    }
+                } catch (e) {
+                    console.warn('Backup check failed:', e);
+                }
+
             }
-            return null;
+            return { id: doc.id, ...doc.data() };
+        } catch (error) {
+            console.error(`Error in getRideById(${id}):`, error);
+            throw error;
         }
-        return { id: doc.id, ...doc.data() };
     },
 
     async getRideByRideId(rideId) {
@@ -588,18 +609,11 @@ const dbHelpers = {
                 return { id: doc.id, ...doc.data() };
             }
         } catch (error) {
-            // Mock Firestore doesn't support .where().limit()
-            console.log('⚠️  Firestore query failed, using in-memory storage');
-        }
-        
-        // Fallback to in-memory storage for mock Firestore
-        const memoryRide = inMemoryRides.find(r => r.rideId === rideId);
-        if (memoryRide) {
-            console.log('🔍 Retrieved ride by rideId from in-memory storage:', rideId);
-            return memoryRide;
+            console.error('⚠️ Firestore query failed in getRideByRideId:', error);
         }
         return null;
     },
+
 
     async getRidesByUserId(userId) {
         try {
@@ -613,13 +627,6 @@ const dbHelpers = {
                     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             }
 
-            // Fallback to in-memory storage for mock Firestore
-            const userRides = inMemoryRides
-                .filter(ride => ride.userId === userId)
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-            
-            console.log('🔍 Retrieved rides by userId from in-memory storage:', userRides.length);
-            return userRides;
         } catch (error) {
             console.error('Error getting rides by user:', error);
             return [];
@@ -638,13 +645,6 @@ const dbHelpers = {
                     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             }
 
-            // Fallback to in-memory storage for mock Firestore
-            const riderRides = inMemoryRides
-                .filter(ride => ride.riderId === riderId)
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-            
-            console.log('🔍 Retrieved rides by riderId from in-memory storage:', riderRides.length);
-            return riderRides;
         } catch (error) {
             console.error('Error getting rides by rider:', error);
             return [];
@@ -665,12 +665,6 @@ const dbHelpers = {
                     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
             }
 
-            // Fallback to in-memory storage for mock Firestore
-            const availableRides = inMemoryRides
-                .filter(ride => ride.status === 'REQUESTED' && (!ride.riderId || ride.riderId === ''))
-                .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-            console.log('🔍 Retrieved available rides from in-memory storage:', availableRides.length);
             return availableRides;
         } catch (error) {
             console.error('Error getting available rides:', error);
@@ -695,17 +689,6 @@ const dbHelpers = {
         // Also update real-time collection for DeliverMi
         await db.collection('customer-rides').doc(id).update(updateData);
 
-        // Update in-memory storage for mock Firestore
-        const rideIndex = inMemoryRides.findIndex(r => r.id === id);
-        if (rideIndex !== -1) {
-            inMemoryRides[rideIndex] = {
-                ...inMemoryRides[rideIndex],
-                ...updateData
-            };
-            console.log('📝 Updated ride in-memory storage:', id, 'Status:', cleanUpdates.status || 'N/A');
-            return inMemoryRides[rideIndex]; // Return updated ride
-        }
-        
         // If not in memory, try to get from Firestore
         return this.getRideById(id);
     },

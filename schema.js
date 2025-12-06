@@ -33,6 +33,8 @@ const typeDefs = gql`
     state: String!
     zipCode: String!
     country: String!
+    latitude: Float
+    longitude: Float
     isDefault: Boolean!
     createdAt: String!
     updatedAt: String!
@@ -233,6 +235,8 @@ const typeDefs = gql`
       state: String!
       zipCode: String!
       country: String!
+      latitude: Float
+      longitude: Float
       isDefault: Boolean
     ): Address!
     updateAddress(
@@ -243,6 +247,8 @@ const typeDefs = gql`
       state: String
       zipCode: String
       country: String
+      latitude: Float
+      longitude: Float
       isDefault: Boolean
     ): Address!
     deleteAddress(id: ID!): Boolean!
@@ -614,21 +620,21 @@ const resolvers = {
         throw new Error('Failed to fetch order');
       }
     },
-    
+
     /**
      * Get single ride by ID
      */
     ride: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const ride = await dbHelpers.getRideById(id);
       if (!ride) return null;
-      
+
       // Only allow user or rider to view
       if (ride.userId !== user.uid && ride.riderId !== user.uid) {
         throw new Error('Access denied');
       }
-      
+
       // Add rider info if ride is accepted
       if (ride.riderId) {
         const rider = await dbHelpers.getUserByUid(ride.riderId);
@@ -643,36 +649,36 @@ const resolvers = {
           };
         }
       }
-      
+
       return ride;
     },
-    
+
     /**
      * Get all rides for authenticated user
      */
     myRides: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const rides = await dbHelpers.getRidesByUserId(user.uid);
       return rides;
     },
-    
+
     /**
      * Get available rides for riders to accept
      */
     availableRides: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const rides = await dbHelpers.getAvailableRides();
       return rides;
     },
-    
+
     /**
      * Get rides assigned to authenticated rider
      */
     riderRides: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       const rides = await dbHelpers.getRidesByRiderId(user.uid);
       return rides;
     },
@@ -983,6 +989,12 @@ const resolvers = {
           }],
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
+          customer: {
+            id: user.uid,
+            email: user.email,
+            name: user.displayName || 'Customer',
+            phone: user.phoneNumber || ''
+          }
         };
 
         // Save to SQLite
@@ -998,7 +1010,7 @@ const resolvers = {
             const ridersSnapshot = await firestore.collection('riders')
               .where('available', '==', true)
               .get();
-            
+
             const tokens = [];
             ridersSnapshot.forEach(doc => {
               const data = doc.data();
@@ -1818,7 +1830,7 @@ const resolvers = {
      */
     requestRide: async (_, { input }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         const rideData = {
           userId: user.uid,
@@ -1835,9 +1847,9 @@ const resolvers = {
           vehicleType: input.vehicleType || 'Standard',
           status: 'REQUESTED',
         };
-        
+
         const ride = await dbHelpers.createRide(rideData);
-        
+
         // Notify available riders via FCM (skip if in mock mode)
         if (admin && admin.messaging && admin.firestore) {
           try {
@@ -1846,7 +1858,7 @@ const resolvers = {
             const ridersSnapshot = await firestore.collection('riders')
               .where('available', '==', true)
               .get();
-            
+
             const tokens = [];
             ridersSnapshot.forEach(doc => {
               const data = doc.data();
@@ -1855,7 +1867,7 @@ const resolvers = {
                 tokens.push(data.fcmToken);
               }
             });
-            
+
             console.log(`📢 Sending ride notification to ${tokens.length} riders`);
 
             if (tokens.length > 0) {
@@ -1870,7 +1882,7 @@ const resolvers = {
                   url: `${DELIVERMI_URL}/ride/${ride.id}`,
                 },
               };
-              
+
               const chunkSize = 500;
               for (let i = 0; i < tokens.length; i += chunkSize) {
                 const chunk = tokens.slice(i, i + chunkSize);
@@ -1889,7 +1901,7 @@ const resolvers = {
             // Continue even if notifications fail
           }
         }
-        
+
         return ride;
       } catch (e) {
         console.error('requestRide error:', e);
@@ -1902,36 +1914,36 @@ const resolvers = {
      */
     acceptRide: async (_, { rideId }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         console.log('🎯 acceptRide called with rideId:', rideId, 'by user:', user.uid);
-        
+
         const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
         console.log('🔍 Found ride:', ride ? ride.id : 'null');
-        
+
         if (!ride) throw new Error('Ride not found');
-        
+
         if (ride.riderId) throw new Error('Ride already accepted');
         if (ride.status !== 'REQUESTED') throw new Error('Ride is not available');
-        
+
         console.log('✅ Ride is available, updating...');
-        
+
         const updatedRide = await dbHelpers.updateRide(ride.id, {
           riderId: user.uid,
           status: 'ACCEPTED',
         });
-        
+
         console.log('✅ Ride updated:', updatedRide ? updatedRide.id : 'null');
-        
+
         if (!updatedRide) {
           console.error('❌ updateRide returned null');
           throw new Error('Failed to update ride');
         }
-        
+
         // Add rider info
         const rider = await dbHelpers.getUserByUid(user.uid);
         console.log('👤 Got rider info:', rider ? rider.uid : 'null');
-        
+
         if (rider) {
           updatedRide.rider = {
             id: rider.uid,
@@ -1942,7 +1954,7 @@ const resolvers = {
             photoURL: rider.photoURL,
           };
         }
-        
+
         console.log('🎉 Returning updated ride:', updatedRide.id);
         return updatedRide;
       } catch (e) {
@@ -1956,16 +1968,16 @@ const resolvers = {
      */
     updateRideStatus: async (_, { rideId, status, confirmCode }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
         if (!ride) throw new Error('Ride not found');
-        
+
         // Only rider or user can update
         if (ride.riderId !== user.uid && ride.userId !== user.uid) {
           throw new Error('Access denied');
         }
-        
+
         // If completing ride, validate confirmation code if provided
         if (status === 'COMPLETED' && confirmCode) {
           // Validate confirmation code matches the one set by customer
@@ -1975,19 +1987,19 @@ const resolvers = {
             providedCode: confirmCode,
             match: ride.deliveryCode === confirmCode
           });
-          
+
           if (!ride.deliveryCode) {
             throw new Error('No delivery code found. Please ask the customer to generate a code first.');
           }
-          
+
           if (ride.deliveryCode !== confirmCode) {
             throw new Error(`Invalid confirmation code. Expected: ${ride.deliveryCode}, Got: ${confirmCode}`);
           }
           console.log('✅ Ride completion confirmed with correct code:', confirmCode);
         }
-        
+
         await dbHelpers.updateRide(ride.id, { status });
-        
+
         return await dbHelpers.getRideById(ride.id);
       } catch (e) {
         console.error('updateRideStatus error:', e);
@@ -2000,19 +2012,19 @@ const resolvers = {
      */
     setDeliveryCode: async (_, { rideId, code }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
         if (!ride) throw new Error('Ride not found');
-        
+
         // Only the customer (userId) can set the delivery code
         if (ride.userId !== user.uid) {
           throw new Error('Only the customer can set the delivery code');
         }
-        
+
         console.log('Setting delivery code for ride:', rideId, 'Code:', code);
         await dbHelpers.updateRide(ride.id, { deliveryCode: code });
-        
+
         return await dbHelpers.getRideById(ride.id);
       } catch (e) {
         console.error('setDeliveryCode error:', e);
@@ -2025,12 +2037,12 @@ const resolvers = {
      */
     updateRiderLocation: async (_, { latitude, longitude }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         await dbHelpers.updateUserLocation(user.uid, latitude, longitude);
-        
+
         const updatedUser = await dbHelpers.getUserByUid(user.uid);
-        
+
         if (!updatedUser) {
           // Return basic user info if database lookup fails
           return {
@@ -2047,7 +2059,7 @@ const resolvers = {
             updatedAt: new Date().toISOString(),
           };
         }
-        
+
         return {
           id: updatedUser.uid || updatedUser.id,
           uid: updatedUser.uid || updatedUser.id,
@@ -2072,12 +2084,12 @@ const resolvers = {
      */
     updateRiderStatus: async (_, { isOnline }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         await dbHelpers.updateRiderStatus(user.uid, isOnline);
-        
+
         const updatedUser = await dbHelpers.getUserByUid(user.uid);
-        
+
         if (!updatedUser) {
           // Return basic user info if database lookup fails
           return {
@@ -2093,7 +2105,7 @@ const resolvers = {
             updatedAt: new Date().toISOString(),
           };
         }
-        
+
         return {
           id: updatedUser.uid || updatedUser.id,
           uid: updatedUser.uid || updatedUser.id,
@@ -2117,18 +2129,18 @@ const resolvers = {
      */
     cancelRide: async (_, { rideId, reason }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
         if (!ride) throw new Error('Ride not found');
-        
+
         // Only user can cancel
         if (ride.userId !== user.uid) throw new Error('Access denied');
-        
+
         await dbHelpers.updateRide(ride.id, {
           status: 'CANCELLED',
         });
-        
+
         return await dbHelpers.getRideById(ride.id);
       } catch (e) {
         console.error('cancelRide error:', e);
@@ -2141,21 +2153,21 @@ const resolvers = {
      */
     rateRide: async (_, { rideId, rating, feedback }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      
+
       try {
         const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
         if (!ride) throw new Error('Ride not found');
-        
+
         // Only user can rate
         if (ride.userId !== user.uid) throw new Error('Access denied');
-        
+
         if (ride.status !== 'COMPLETED') throw new Error('Can only rate completed rides');
-        
+
         await dbHelpers.updateRide(ride.id, {
           rating,
           feedback: feedback || null,
         });
-        
+
         return await dbHelpers.getRideById(ride.id);
       } catch (e) {
         console.error('rateRide error:', e);
