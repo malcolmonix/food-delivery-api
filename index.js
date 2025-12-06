@@ -286,6 +286,19 @@ async function startServer() {
   await server.start();
   server.applyMiddleware({ app });
 
+  // Global Error Handler Middleware
+  app.use((err, req, res, next) => {
+    console.error('🔥 Global API Error:', err.stack || err.message || err);
+    if (res.headersSent) {
+      return next(err);
+    }
+    res.status(500).json({
+      error: 'Internal Server Error',
+      message: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  });
+
   const PORT = process.env.PORT || 4000;
   app.listen({ port: PORT }, () =>
     console.log(`🚀 Food Delivery API server ready at http://localhost:${PORT}${server.graphqlPath}`)

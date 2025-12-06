@@ -270,6 +270,12 @@ const typeDefs = gql`
       status: String!
       note: String
     ): Order!
+    updatePaymentStatus(
+      orderId: ID!
+      status: String!
+      paymentMethod: String!
+      transactionId: String
+    ): Order!
     createRestaurant(
       name: String!
       description: String!
@@ -1253,6 +1259,75 @@ const resolvers = {
       } catch (error) {
         console.error('Error updating order status:', error);
         throw new Error('Failed to update order status: ' + error.message);
+      }
+    },
+    /**
+     * Update payment status (callback for payment gateways)
+     */
+    updatePaymentStatus: async (_, { orderId, status, paymentMethod, transactionId }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        console.log(`💰 Processing payment update for order ${orderId}: ${status}`);
+
+        // Get current order
+        const currentOrder = dbHelpers.getOrderById(orderId);
+        if (!currentOrder) throw new Error('Order not found');
+
+        // Only allow update if order belongs to user
+        if (currentOrder.userId !== user.uid) {
+          throw new Error('Access denied: Can only update your own orders');
+        }
+
+        // Prepare updates
+        const updates = {
+          updatedAt: new Date().toISOString()
+        };
+
+        if (status === 'COMPLETED' || status === 'SUCCESS') {
+          updates.orderStatus = 'CONFIRMED';
+          updates.paymentProcessed = true;
+          updates.paymentMethod = paymentMethod || currentOrder.paymentMethod;
+
+          // Add status history entry
+          const statusHistory = JSON.parse(currentOrder.statusHistory || '[]');
+          statusHistory.push({
+            status: 'CONFIRMED',
+            timestamp: new Date().toISOString(),
+            note: `Payment successful (${paymentMethod})`
+          });
+          updates.statusHistory = statusHistory;
+        }
+
+        // Apply updates
+        dbHelpers.updateOrder(orderId, updates);
+
+        // Also update Firestore for real-time sync
+        const orderRef = db.collection('orders').doc(orderId);
+        await orderRef.update(updates);
+
+        // Update customer mirror
+        await db.collection('customer-orders').doc(orderId).update(updates);
+
+        console.log(`✅ Payment updated for order ${orderId}`);
+
+        // Return updated order
+        const updatedOrder = dbHelpers.getOrderById(orderId);
+        return {
+          ...updatedOrder,
+          orderItems: JSON.parse(updatedOrder.orderItems),
+          statusHistory: JSON.parse(updatedOrder.statusHistory),
+          isPickedUp: Boolean(updatedOrder.isPickedUp),
+          customer: {
+            id: user.uid,
+            email: user.email,
+            name: user.displayName || 'Customer',
+            phone: user.phoneNumber || ''
+          }
+        };
+      } catch (error) {
+        console.error('❌ Error updating payment status:', error);
+        throw new Error('Failed to update payment status: ' + error.message);
       }
     },
     /**

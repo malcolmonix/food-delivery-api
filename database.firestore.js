@@ -665,7 +665,7 @@ const dbHelpers = {
                     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
             }
 
-            return availableRides;
+            return [];
         } catch (error) {
             console.error('Error getting available rides:', error);
             return [];
