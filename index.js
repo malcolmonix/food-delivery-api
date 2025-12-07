@@ -26,7 +26,23 @@ async function startServer() {
   const originList = allowedOrigins.length ? allowedOrigins : defaultOrigins;
 
   app.use(cors({
-    origin: originList,
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, Postman, etc.)
+      if (!origin) return callback(null, true);
+      
+      // Check if origin is in the allowed list
+      if (originList.includes(origin)) {
+        return callback(null, true);
+      }
+      
+      // Allow Vercel preview deployments
+      if (origin.includes('.vercel.app')) {
+        return callback(null, true);
+      }
+      
+      // Reject other origins
+      callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-api-key', 'x-api_key', 'x-api']
