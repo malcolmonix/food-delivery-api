@@ -25,7 +25,7 @@ async function startServer() {
 
   const originList = allowedOrigins.length ? allowedOrigins : defaultOrigins;
 
-  app.use(cors({
+  const corsOptions = {
     origin: (origin, callback) => {
       // Allow requests with no origin (mobile apps, Postman, etc.)
       if (!origin) return callback(null, true);
@@ -45,11 +45,17 @@ async function startServer() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-api-key', 'x-api_key', 'x-api']
-  }));
+    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-api-key', 'x-api_key', 'x-api'],
+    exposedHeaders: ['Content-Length', 'Content-Type'],
+    maxAge: 86400, // 24 hours
+    preflightContinue: false,
+    optionsSuccessStatus: 204
+  };
+
+  app.use(cors(corsOptions));
 
   // Handle preflight quickly
-  app.options('*', cors());
+  app.options('*', cors(corsOptions));
 
   // Authentication middleware using Firebase Auth
   const authMiddleware = async (req, res, next) => {
