@@ -644,6 +644,8 @@ const dbHelpers = {
                     .map(doc => ({ id: doc.id, ...doc.data() }))
                     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             }
+            
+            return []; // Return empty array when no rides found
 
         } catch (error) {
             console.error('Error getting rides by rider:', error);
