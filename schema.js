@@ -437,7 +437,7 @@ const resolvers = {
         userDoc = await dbHelpers.getUserByUid(user.uid);
       }
       
-      return getUserById(user.uid);
+      return await getUserById(user.uid);
     },
     /**
      * Get all orders for authenticated user
@@ -476,7 +476,7 @@ const resolvers = {
     addresses: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
 
-      const addresses = dbHelpers.getAddressesByUserId(user.uid);
+      const addresses = await dbHelpers.getAddressesByUserId(user.uid);
       return addresses.map(addr => ({
         ...addr,
         isDefault: Boolean(addr.isDefault),
@@ -2417,10 +2417,10 @@ async function uploadFileToStorage(file, folder = 'images') {
  */
 async function getUserById(uid) {
   try {
-    const user = dbHelpers.getUserByUid(uid);
+    const user = await dbHelpers.getUserByUid(uid);
     if (!user) return null;
 
-    const addresses = dbHelpers.getAddressesByUserId(uid);
+    const addresses = await dbHelpers.getAddressesByUserId(uid);
 
     return {
       id: uid,
