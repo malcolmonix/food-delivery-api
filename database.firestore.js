@@ -626,7 +626,7 @@ const dbHelpers = {
                     .map(doc => ({ id: doc.id, ...doc.data() }))
                     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             }
-
+            return [];
         } catch (error) {
             console.error('Error getting rides by user:', error);
             return [];
