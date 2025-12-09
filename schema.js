@@ -657,6 +657,12 @@ const resolvers = {
 
       // Only allow user or rider to view
       if (ride.userId !== user.uid && ride.riderId !== user.uid) {
+        console.error('🔐 Access denied for ride:', {
+          rideId: id,
+          rideUserId: ride.userId,
+          rideRiderId: ride.riderId,
+          requestingUserId: user.uid,
+        });
         throw new Error('Access denied');
       }
 
