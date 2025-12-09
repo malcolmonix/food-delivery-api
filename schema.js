@@ -415,9 +415,28 @@ const resolvers = {
   Query: {
     /**
      * Get current authenticated user profile
+     * Auto-creates user in Firestore if they don't exist
      */
     me: async (_, __, { user }) => {
       if (!user) return null;
+      
+      // Check if user exists in Firestore
+      let userDoc = await dbHelpers.getUserByUid(user.uid);
+      
+      // If not, create from Firebase Auth data
+      if (!userDoc) {
+        await dbHelpers.createUser({
+          uid: user.uid,
+          email: user.email,
+          displayName: user.name || user.email?.split('@')[0],
+          phoneNumber: user.phone_number || null,
+          photoURL: user.picture || null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        userDoc = await dbHelpers.getUserByUid(user.uid);
+      }
+      
       return getUserById(user.uid);
     },
     /**

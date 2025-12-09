@@ -14,3 +14,4 @@ node_modules/
 database.js
 database.vercel.js
 food-delivery.db
+.env*.local
