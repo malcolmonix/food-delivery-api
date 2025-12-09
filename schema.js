@@ -655,13 +655,23 @@ const resolvers = {
       const ride = await dbHelpers.getRideById(id);
       if (!ride) return null;
 
-      // Only allow user or rider to view
-      if (ride.userId !== user.uid && ride.riderId !== user.uid) {
+      // Allow access if:
+      // 1. User is the ride owner (userId matches)
+      // 2. User is the assigned rider (riderId matches)
+      // 3. Ride is unassigned (no riderId) and requesting user created it via the API
+      const isOwner = ride.userId === user.uid;
+      const isAssignedRider = ride.riderId && ride.riderId === user.uid;
+      const isUnassignedRide = !ride.riderId;
+
+      if (!isOwner && !isAssignedRider) {
         console.error('🔐 Access denied for ride:', {
           rideId: id,
           rideUserId: ride.userId,
           rideRiderId: ride.riderId,
           requestingUserId: user.uid,
+          isOwner,
+          isAssignedRider,
+          isUnassignedRide
         });
         throw new Error('Access denied');
       }
