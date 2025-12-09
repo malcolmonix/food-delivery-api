@@ -49,7 +49,7 @@ async function startServer() {
     exposedHeaders: ['Content-Length', 'Content-Type'],
     maxAge: 86400, // 24 hours
     preflightContinue: false,
-    optionsSuccessStatus: 204
+    optionsSuccessStatus: 200
   };
 
   app.use(cors(corsOptions));
