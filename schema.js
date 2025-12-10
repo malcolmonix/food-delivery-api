@@ -423,7 +423,8 @@ const resolvers = {
         return null;
       }
       
-      console.log('🔍 ME RESOLVER: Looking up user:', user.uid);
+      console.log('🔍 ME RESOLVER: User object keys:', Object.keys(user));
+      console.log('🔍 ME RESOLVER: Looking up user:', user.uid, 'Email:', user.email, 'Name:', user.name);
       
       // Check if user exists in Firestore
       let userDoc = await dbHelpers.getUserByUid(user.uid);

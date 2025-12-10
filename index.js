@@ -66,6 +66,8 @@ async function startServer() {
       try {
         // Verify Firebase ID token
         const decodedToken = await admin.auth().verifyIdToken(token);
+        console.log('🔐 Auth Middleware: Decoded token keys:', Object.keys(decodedToken));
+        console.log('🔐 Auth Middleware: UID:', decodedToken.uid, 'Email:', decodedToken.email);
         req.user = decodedToken;
       } catch (error) {
         console.error('Error verifying Firebase token:', error.message);
