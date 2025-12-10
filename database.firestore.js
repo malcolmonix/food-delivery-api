@@ -730,42 +730,62 @@ const dbHelpers = {
      * Called by customers requesting rides
      */
     async createRideRequest(rideData) {
-        const docId = generateId();
-        const rideId = `RIDE-${Date.now()}`;
-        
-        const pendingRef = db.collection('rides').doc('pending').collection('rides').doc(docId);
-        
-        const rideDoc = {
-            id: docId,
-            rideId,
-            userId: rideData.userId,
-            riderId: null,
-            pickupAddress: rideData.pickupAddress,
-            pickupLat: rideData.pickupLat,
-            pickupLng: rideData.pickupLng,
-            dropoffAddress: rideData.dropoffAddress,
-            dropoffLat: rideData.dropoffLat,
-            dropoffLng: rideData.dropoffLng,
-            status: 'REQUESTED',
-            fare: rideData.fare,
-            distance: rideData.distance,
-            duration: rideData.duration,
-            paymentMethod: rideData.paymentMethod || 'CASH',
-            rating: null,
-            feedback: null,
-            deliveryCode: rideData.deliveryCode || null,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-        };
+        try {
+            const docId = generateId();
+            const rideId = `RIDE-${Date.now()}`;
+            
+            console.log('🔥 Creating ride request:', { docId, rideId, userId: rideData.userId });
+            
+            const rideDoc = {
+                id: docId,
+                rideId,
+                userId: rideData.userId,
+                riderId: null,
+                pickupAddress: rideData.pickupAddress,
+                pickupLat: rideData.pickupLat,
+                pickupLng: rideData.pickupLng,
+                dropoffAddress: rideData.dropoffAddress,
+                dropoffLat: rideData.dropoffLat,
+                dropoffLng: rideData.dropoffLng,
+                status: 'REQUESTED',
+                fare: rideData.fare,
+                distance: rideData.distance,
+                duration: rideData.duration,
+                paymentMethod: rideData.paymentMethod || 'CASH',
+                rating: null,
+                feedback: null,
+                deliveryCode: rideData.deliveryCode || null,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
 
-        await pendingRef.set(rideDoc);
+            // Write to legacy collection first (simpler, more reliable)
+            console.log('📝 Writing to legacy rides collection...');
+            await db.collection('rides').doc(docId).set(rideDoc);
+            console.log('✅ Written to rides collection');
 
-        // Also write to legacy collection for backward compatibility
-        await db.collection('rides').doc(docId).set(rideDoc);
-        await db.collection('customer-rides').doc(docId).set(rideDoc);
+            // Write to legacy customer-rides for dual sync
+            console.log('📝 Writing to customer-rides...');
+            await db.collection('customer-rides').doc(docId).set(rideDoc);
+            console.log('✅ Written to customer-rides');
 
-        console.log('✅ Created pending ride request:', rideId);
-        return rideDoc;
+            // Try writing to subcollection (Phase 3 structure)
+            try {
+                console.log('📝 Writing to rides/pending subcollection...');
+                const pendingRef = db.collection('rides').doc('pending').collection('rides').doc(docId);
+                await pendingRef.set(rideDoc);
+                console.log('✅ Written to rides/pending/rides');
+            } catch (subErr) {
+                console.warn('⚠️ Could not write to rides/pending subcollection:', subErr.message);
+                // Continue - legacy collection is already written
+            }
+
+            console.log('✅ Created ride request:', rideId);
+            return rideDoc;
+        } catch (error) {
+            console.error('❌ createRideRequest error:', error);
+            throw error;
+        }
     },
 
     /**

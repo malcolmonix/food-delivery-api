@@ -2030,6 +2030,8 @@ const resolvers = {
       if (!user) throw new Error('Authentication required');
 
       try {
+        console.log('🚀 requestRide mutation started for user:', user.uid);
+
         const rideData = {
           userId: user.uid,
           pickupAddress: input.pickupAddress,
@@ -2045,66 +2047,71 @@ const resolvers = {
           vehicleType: input.vehicleType || 'Standard',
         };
 
+        console.log('📊 Ride data:', rideData);
+
         // Use new Phase 3 helper: creates in pending subcollection
         const ride = await dbHelpers.createRideRequest(rideData);
-        console.log('✅ Ride request created in pending subcollection:', ride.rideId);
+        console.log('✅ Ride request created:', ride.rideId);
 
-        // Notify available riders via FCM (skip if in mock mode)
+        // Notify available riders via FCM (non-blocking, don't wait)
         if (admin && admin.messaging && admin.firestore) {
-          try {
-            const firestore = admin.firestore();
-            // Query riders collection for riders who are online (available == true) and have FCM tokens
-            const ridersSnapshot = await firestore.collection('riders')
-              .where('available', '==', true)
-              .get();
+          (async () => {
+            try {
+              const firestore = admin.firestore();
+              // Query riders collection for riders who are online (available == true) and have FCM tokens
+              const ridersSnapshot = await firestore.collection('riders')
+                .where('available', '==', true)
+                .get();
 
-            const tokens = [];
-            ridersSnapshot.forEach(doc => {
-              const data = doc.data();
-              if (data && data.fcmToken) {
-                console.log(`📍 Found online rider with FCM token: ${doc.id}`);
-                tokens.push(data.fcmToken);
-              }
-            });
-
-            console.log(`📢 Sending ride notification to ${tokens.length} riders`);
-
-            if (tokens.length > 0) {
-              const message = {
-                notification: {
-                  title: 'New Ride Request',
-                  body: `${input.pickupAddress} → ${input.dropoffAddress} - $${input.fare}`,
-                },
-                data: {
-                  type: 'NEW_RIDE',
-                  rideId: ride.rideId,
-                  url: `${DELIVERMI_URL}/ride/${ride.id}`,
-                },
-              };
-
-              const chunkSize = 500;
-              for (let i = 0; i < tokens.length; i += chunkSize) {
-                const chunk = tokens.slice(i, i + chunkSize);
-                try {
-                  await admin.messaging().sendMulticast({ tokens: chunk, ...message });
-                  console.log(`✅ Sent notification to ${chunk.length} riders`);
-                } catch (err) {
-                  console.error('Failed to send notification chunk:', err.message);
+              const tokens = [];
+              ridersSnapshot.forEach(doc => {
+                const data = doc.data();
+                if (data && data.fcmToken) {
+                  console.log(`📍 Found online rider with FCM token: ${doc.id}`);
+                  tokens.push(data.fcmToken);
                 }
+              });
+
+              console.log(`📢 Sending ride notification to ${tokens.length} riders`);
+
+              if (tokens.length > 0) {
+                const message = {
+                  notification: {
+                    title: 'New Ride Request',
+                    body: `${input.pickupAddress} → ${input.dropoffAddress} - ₦${input.fare}`,
+                  },
+                  data: {
+                    type: 'NEW_RIDE',
+                    rideId: ride.rideId,
+                    url: `${DELIVERMI_URL}/ride/${ride.id}`,
+                  },
+                };
+
+                const chunkSize = 500;
+                for (let i = 0; i < tokens.length; i += chunkSize) {
+                  const chunk = tokens.slice(i, i + chunkSize);
+                  try {
+                    await admin.messaging().sendMulticast({ tokens: chunk, ...message });
+                    console.log(`✅ Sent notification to ${chunk.length} riders`);
+                  } catch (err) {
+                    console.error('Failed to send notification chunk:', err.message);
+                  }
+                }
+              } else {
+                console.log('⚠️  No online riders available to notify');
               }
-            } else {
-              console.log('⚠️  No online riders available to notify');
+            } catch (notifyErr) {
+              console.error('Failed to notify riders:', notifyErr);
+              // Don't throw - ride is already created
             }
-          } catch (notifyErr) {
-            console.error('Failed to notify riders:', notifyErr);
-            // Continue even if notifications fail
-          }
+          })();
         }
 
+        console.log('✅ requestRide mutation completed successfully');
         return ride;
       } catch (e) {
-        console.error('requestRide error:', e);
-        throw new Error('Failed to request ride: ' + e.message);
+        console.error('❌ requestRide error:', e);
+        throw new Error('Failed to request ride: ' + (e.message || 'Unknown error'));
       }
     },
 
