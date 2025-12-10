@@ -418,13 +418,20 @@ const resolvers = {
      * Auto-creates user in Firestore if they don't exist
      */
     me: async (_, __, { user }) => {
-      if (!user) return null;
+      if (!user) {
+        console.error('❌ ME RESOLVER: No user in context');
+        return null;
+      }
+      
+      console.log('🔍 ME RESOLVER: Looking up user:', user.uid);
       
       // Check if user exists in Firestore
       let userDoc = await dbHelpers.getUserByUid(user.uid);
+      console.log('🔍 ME RESOLVER: User doc found:', !!userDoc);
       
       // If not, create from Firebase Auth data
       if (!userDoc) {
+        console.log('✅ ME RESOLVER: Creating new user');
         await dbHelpers.createUser({
           uid: user.uid,
           email: user.email,
@@ -434,10 +441,15 @@ const resolvers = {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         });
+        console.log('✅ ME RESOLVER: User created, re-fetching');
         userDoc = await dbHelpers.getUserByUid(user.uid);
+        console.log('🔍 ME RESOLVER: User doc after creation:', !!userDoc);
       }
       
-      return await getUserById(user.uid);
+      console.log('✅ ME RESOLVER: Calling getUserById');
+      const result = await getUserById(user.uid);
+      console.log('🔍 ME RESOLVER: Final result:', !!result);
+      return result;
     },
     /**
      * Get all orders for authenticated user
@@ -2429,15 +2441,16 @@ async function getUserById(uid) {
       displayName: user.displayName,
       phoneNumber: user.phoneNumber,
       photoURL: user.photoURL,
-      addresses: addresses.map(addr => ({
+      addresses: Array.isArray(addresses) ? addresses.map(addr => ({
         ...addr,
         isDefault: Boolean(addr.isDefault),
-      })),
+      })) : [],
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };
   } catch (error) {
-    console.error('Error getting user by ID:', error);
+    console.error('❌ Error getting user by ID:', error.message, 'for UID:', uid);
+    console.error('Stack:', error.stack);
     return null;
   }
 }
