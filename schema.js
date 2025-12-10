@@ -164,6 +164,7 @@ const typeDefs = gql`
     feedback: String
     deliveryCode: String
     rider: RiderInfo
+    location: String      # Phase 3: subcollection location (pending/accepted/completed)
     createdAt: String!
     updatedAt: String!
   }
@@ -175,6 +176,13 @@ const typeDefs = gql`
     latitude: Float
     longitude: Float
     photoURL: String
+  }
+
+  type RiderEarnings {
+    totalEarnings: Float!
+    totalRides: Int!
+    averagePerRide: Float!
+    rides: [Ride!]!
   }
 
   input RideInput {
@@ -210,7 +218,11 @@ const typeDefs = gql`
     # Ride queries
     ride(id: ID!): Ride
     myRides: [Ride!]!
-    availableRides: [Ride!]!
+    # Phase 3: Ride system queries
+    activeRide: Ride                           # Get customer's current active ride
+    rideHistory(limit: Int, offset: Int): [Ride!]! # Get customer's completed rides
+    riderEarnings(periodDays: Int): RiderEarnings!  # Get rider's earnings
+    riderOrderHistory(limit: Int, offset: Int): [Ride!]! # Get rider's completed deliveries
     riderRides: [Ride!]!
   }
 
@@ -718,23 +730,86 @@ const resolvers = {
     },
 
     /**
-     * Get available rides for riders to accept
+     * Get available rides for riders to accept (Phase 3: from pending subcollection)
      */
     availableRides: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
 
-      const rides = await dbHelpers.getAvailableRides();
-      return rides;
+      // Query pending rides (new Phase 3 structure)
+      const pendingRides = await dbHelpers.getPendingRides();
+      
+      // Fallback to legacy getAvailableRides for backward compatibility
+      if (!pendingRides || pendingRides.length === 0) {
+        console.log('ℹ️ No pending rides found, checking legacy collection...');
+        const legacyRides = await dbHelpers.getAvailableRides();
+        return legacyRides;
+      }
+
+      return pendingRides;
     },
 
     /**
-     * Get rides assigned to authenticated rider
+     * Get rides assigned to authenticated rider (Phase 3: from accepted subcollection)
      */
     riderRides: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
 
-      const rides = await dbHelpers.getRidesByRiderId(user.uid);
-      return rides;
+      // Query accepted rides for this rider (new Phase 3 structure)
+      const acceptedRides = await dbHelpers.getAcceptedRidesByRider(user.uid);
+      
+      // Fallback to legacy getRidesByRiderId for backward compatibility
+      if (!acceptedRides || acceptedRides.length === 0) {
+        console.log('ℹ️ No accepted rides found, checking legacy collection...');
+        const legacyRides = await dbHelpers.getRidesByRiderId(user.uid);
+        return legacyRides;
+      }
+
+      return acceptedRides;
+    },
+
+    /**
+     * Get active ride for authenticated customer (Phase 3)
+     */
+    activeRide: async (_, __, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      const activeRide = await dbHelpers.getActiveRideForCustomer(user.uid);
+      return activeRide;
+    },
+
+    /**
+     * Get ride history for authenticated customer (Phase 3)
+     */
+    rideHistory: async (_, { limit = 20, offset = 0 }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      const history = await dbHelpers.getRideHistory(user.uid, 'customer', limit, offset);
+      return history;
+    },
+
+    /**
+     * Get earnings for authenticated rider (Phase 3)
+     */
+    riderEarnings: async (_, { periodDays = 7 }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      const earnings = await dbHelpers.getRiderEarnings(user.uid, periodDays);
+      return earnings || {
+        totalEarnings: 0,
+        totalRides: 0,
+        averagePerRide: 0,
+        rides: []
+      };
+    },
+
+    /**
+     * Get delivery history for authenticated rider (Phase 3)
+     */
+    riderOrderHistory: async (_, { limit = 20, offset = 0 }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      const history = await dbHelpers.getRideHistory(user.uid, 'rider', limit, offset);
+      return history;
     },
   },
   Mutation: {
@@ -1949,7 +2024,7 @@ const resolvers = {
     },
 
     /**
-     * Request a new ride
+     * Request a new ride (Phase 3: creates in pending subcollection)
      */
     requestRide: async (_, { input }, { user }) => {
       if (!user) throw new Error('Authentication required');
@@ -1968,10 +2043,11 @@ const resolvers = {
           duration: input.duration,
           paymentMethod: input.paymentMethod || 'CASH',
           vehicleType: input.vehicleType || 'Standard',
-          status: 'REQUESTED',
         };
 
-        const ride = await dbHelpers.createRide(rideData);
+        // Use new Phase 3 helper: creates in pending subcollection
+        const ride = await dbHelpers.createRideRequest(rideData);
+        console.log('✅ Ride request created in pending subcollection:', ride.rideId);
 
         // Notify available riders via FCM (skip if in mock mode)
         if (admin && admin.messaging && admin.firestore) {
@@ -2033,34 +2109,21 @@ const resolvers = {
     },
 
     /**
-     * Accept a ride request
+     * Accept a ride request (Phase 3: moves from pending to accepted subcollection)
      */
     acceptRide: async (_, { rideId }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        console.log('🎯 acceptRide called with rideId:', rideId, 'by user:', user.uid);
+        console.log('🎯 acceptRide called with rideId:', rideId, 'by rider:', user.uid);
 
-        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
-        console.log('🔍 Found ride:', ride ? ride.id : 'null');
-
-        if (!ride) throw new Error('Ride not found');
-
-        if (ride.riderId) throw new Error('Ride already accepted');
-        if (ride.status !== 'REQUESTED') throw new Error('Ride is not available');
-
-        console.log('✅ Ride is available, updating...');
-
-        const updatedRide = await dbHelpers.updateRide(ride.id, {
-          riderId: user.uid,
-          status: 'ACCEPTED',
-        });
-
-        console.log('✅ Ride updated:', updatedRide ? updatedRide.id : 'null');
+        // Use new Phase 3 helper: moves pending → accepted
+        const updatedRide = await dbHelpers.acceptRide(rideId, user.uid);
+        console.log('✅ Ride accepted and moved to accepted subcollection');
 
         if (!updatedRide) {
-          console.error('❌ updateRide returned null');
-          throw new Error('Failed to update ride');
+          console.error('❌ acceptRide helper returned null');
+          throw new Error('Failed to accept ride');
         }
 
         // Add rider info
@@ -2078,7 +2141,7 @@ const resolvers = {
           };
         }
 
-        console.log('🎉 Returning updated ride:', updatedRide.id);
+        console.log('🎉 Returning accepted ride:', updatedRide.rideId);
         return updatedRide;
       } catch (e) {
         console.error('❌ acceptRide error:', e.message || e);
@@ -2087,23 +2150,36 @@ const resolvers = {
     },
 
     /**
-     * Update ride status
+     * Update ride status (Phase 3: within accepted subcollection)
      */
     updateRideStatus: async (_, { rideId, status, confirmCode }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        // Find the ride in accepted collection first
+        let ride = await dbHelpers.getAcceptedRidesByRider(user.uid)
+          .then(rides => rides.find(r => r.rideId === rideId || r.id === rideId));
+        
+        // If not found, try customer's rides
+        if (!ride) {
+          ride = await dbHelpers.getAcceptedRidesByCustomer(user.uid)
+            .then(rides => rides.find(r => r.rideId === rideId || r.id === rideId));
+        }
+
+        // Fallback to legacy queries for backward compatibility
+        if (!ride) {
+          ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
+        }
+
         if (!ride) throw new Error('Ride not found');
 
-        // Only rider or user can update
+        // Only rider or customer can update
         if (ride.riderId !== user.uid && ride.userId !== user.uid) {
           throw new Error('Access denied');
         }
 
         // If completing ride, validate confirmation code if provided
-        if (status === 'COMPLETED' && confirmCode) {
-          // Validate confirmation code matches the one set by customer
+        if (status === 'DELIVERED' && confirmCode) {
           console.log('🔐 Code validation:', {
             rideId: ride.rideId,
             storedCode: ride.deliveryCode,
@@ -2118,12 +2194,15 @@ const resolvers = {
           if (ride.deliveryCode !== confirmCode) {
             throw new Error(`Invalid confirmation code. Expected: ${ride.deliveryCode}, Got: ${confirmCode}`);
           }
-          console.log('✅ Ride completion confirmed with correct code:', confirmCode);
+          console.log('✅ Ride delivery confirmed with correct code:', confirmCode);
+
+          // Complete the ride when delivered
+          return await dbHelpers.completeRide(ride.id);
         }
 
-        await dbHelpers.updateRide(ride.id, { status });
-
-        return await dbHelpers.getRideById(ride.id);
+        // Use new Phase 3 helper for status updates within accepted subcollection
+        const updatedRide = await dbHelpers.updateRideStatus(ride.id, status);
+        return updatedRide;
       } catch (e) {
         console.error('updateRideStatus error:', e);
         throw new Error(e.message || 'Failed to update ride status');
@@ -2272,29 +2351,40 @@ const resolvers = {
     },
 
     /**
-     * Rate a completed ride
+     * Rate a completed ride (Phase 3)
      */
     rateRide: async (_, { rideId, rating, feedback }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
-        const ride = await dbHelpers.getRideByRideId(rideId) || await dbHelpers.getRideById(rideId);
-        if (!ride) throw new Error('Ride not found');
+        // Look for completed ride
+        const completedRides = await dbHelpers.getRideHistory(user.uid, 'customer', 100, 0)
+          .then(rides => rides.filter(r => r.rideId === rideId || r.id === rideId));
 
-        // Only user can rate
-        if (ride.userId !== user.uid) throw new Error('Access denied');
+        if (!completedRides || completedRides.length === 0) {
+          throw new Error('Completed ride not found');
+        }
 
-        if (ride.status !== 'COMPLETED') throw new Error('Can only rate completed rides');
+        const ride = completedRides[0];
 
-        await dbHelpers.updateRide(ride.id, {
-          rating,
-          feedback: feedback || null,
-        });
+        // Only customer can rate
+        if (ride.userId !== user.uid) {
+          throw new Error('Only the customer can rate the ride');
+        }
+
+        // Update the completed ride with customer rating
+        const ratingData = {
+          rating: Math.min(Math.max(rating, 1), 5), // Clamp 1-5
+          feedback: feedback || null
+        };
+
+        // For now, update using legacy method (will be replaced with direct subcollection update)
+        await dbHelpers.updateRide(ride.id, ratingData);
 
         return await dbHelpers.getRideById(ride.id);
       } catch (e) {
         console.error('rateRide error:', e);
-        throw new Error('Failed to rate ride');
+        throw new Error(e.message || 'Failed to rate ride');
       }
     },
 

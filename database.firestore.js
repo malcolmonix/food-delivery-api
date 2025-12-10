@@ -722,6 +722,422 @@ const dbHelpers = {
             lastStatusUpdate: new Date().toISOString()
         });
     },
+
+    // ==================== RIDE SUBCOLLECTION OPERATIONS (Phase 3) ====================
+
+    /**
+     * Create a ride request in the pending subcollection
+     * Called by customers requesting rides
+     */
+    async createRideRequest(rideData) {
+        const docId = generateId();
+        const rideId = `RIDE-${Date.now()}`;
+        
+        const pendingRef = db.collection('rides').doc('pending').collection('rides').doc(docId);
+        
+        const rideDoc = {
+            id: docId,
+            rideId,
+            userId: rideData.userId,
+            riderId: null,
+            pickupAddress: rideData.pickupAddress,
+            pickupLat: rideData.pickupLat,
+            pickupLng: rideData.pickupLng,
+            dropoffAddress: rideData.dropoffAddress,
+            dropoffLat: rideData.dropoffLat,
+            dropoffLng: rideData.dropoffLng,
+            status: 'REQUESTED',
+            fare: rideData.fare,
+            distance: rideData.distance,
+            duration: rideData.duration,
+            paymentMethod: rideData.paymentMethod || 'CASH',
+            rating: null,
+            feedback: null,
+            deliveryCode: rideData.deliveryCode || null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+
+        await pendingRef.set(rideDoc);
+
+        // Also write to legacy collection for backward compatibility
+        await db.collection('rides').doc(docId).set(rideDoc);
+        await db.collection('customer-rides').doc(docId).set(rideDoc);
+
+        console.log('✅ Created pending ride request:', rideId);
+        return rideDoc;
+    },
+
+    /**
+     * Move ride from pending to accepted when rider accepts
+     * Merges rider information and transitions status
+     */
+    async acceptRide(rideId, riderId) {
+        try {
+            // Find the pending ride (by rideId or id)
+            const pendingRef = db.collection('rides').doc('pending').collection('rides');
+            
+            let pendingDoc = null;
+            let docId = null;
+
+            // Try finding by id first
+            if (rideId.includes('-') && !rideId.startsWith('RIDE-')) {
+                // It's a doc id
+                const doc = await pendingRef.doc(rideId).get();
+                if (doc.exists) {
+                    pendingDoc = { id: doc.id, ...doc.data() };
+                    docId = doc.id;
+                }
+            }
+
+            // If not found, search by rideId
+            if (!pendingDoc) {
+                const snapshot = await pendingRef.where('rideId', '==', rideId).limit(1).get();
+                if (!snapshot.empty) {
+                    const doc = snapshot.docs[0];
+                    pendingDoc = { id: doc.id, ...doc.data() };
+                    docId = doc.id;
+                }
+            }
+
+            if (!pendingDoc) {
+                console.error(`❌ Ride ${rideId} not found in pending collection`);
+                return null;
+            }
+
+            // Get rider info
+            const riderInfo = await this.getUserByUid(riderId);
+
+            // Prepare accepted ride doc
+            const acceptedRideDoc = {
+                ...pendingDoc,
+                riderId,
+                riderName: riderInfo?.displayName || 'Unknown Rider',
+                riderPhone: riderInfo?.phoneNumber || null,
+                riderPhoto: riderInfo?.photoURL || null,
+                status: 'ACCEPTED',
+                acceptedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+
+            // Write to accepted subcollection
+            const acceptedRef = db.collection('rides').doc('accepted').collection('rides').doc(docId);
+            await acceptedRef.set(acceptedRideDoc);
+
+            // Delete from pending
+            await pendingRef.doc(docId).delete();
+
+            // Update legacy collection
+            await db.collection('rides').doc(docId).update({
+                ...acceptedRideDoc
+            });
+            await db.collection('customer-rides').doc(docId).update({
+                ...acceptedRideDoc
+            });
+
+            console.log('✅ Ride accepted and moved to accepted collection:', rideId);
+            return acceptedRideDoc;
+
+        } catch (error) {
+            console.error('❌ Error accepting ride:', error);
+            throw error;
+        }
+    },
+
+    /**
+     * Update ride status within accepted collection
+     * Handles: ACCEPTED → ARRIVED_AT_PICKUP → PICKED_UP → ARRIVED_AT_DROPOFF → DELIVERED
+     */
+    async updateRideStatus(rideId, status) {
+        try {
+            const acceptedRef = db.collection('rides').doc('accepted').collection('rides');
+            
+            let docId = null;
+            let rideDoc = null;
+
+            // Try finding by id first
+            if (rideId.includes('-') && !rideId.startsWith('RIDE-')) {
+                const doc = await acceptedRef.doc(rideId).get();
+                if (doc.exists) {
+                    rideDoc = { id: doc.id, ...doc.data() };
+                    docId = doc.id;
+                }
+            }
+
+            // If not found, search by rideId
+            if (!rideDoc) {
+                const snapshot = await acceptedRef.where('rideId', '==', rideId).limit(1).get();
+                if (!snapshot.empty) {
+                    const doc = snapshot.docs[0];
+                    rideDoc = { id: doc.id, ...doc.data() };
+                    docId = doc.id;
+                }
+            }
+
+            if (!rideDoc) {
+                console.error(`❌ Ride ${rideId} not found in accepted collection`);
+                return null;
+            }
+
+            const updatedRide = {
+                ...rideDoc,
+                status,
+                updatedAt: new Date().toISOString(),
+                [`${status}At`]: new Date().toISOString() // Track when each status was reached
+            };
+
+            // Update in accepted collection
+            await acceptedRef.doc(docId).update(updatedRide);
+
+            // Update legacy collections
+            await db.collection('rides').doc(docId).update(updatedRide);
+            await db.collection('customer-rides').doc(docId).update(updatedRide);
+
+            console.log(`✅ Ride status updated to ${status}:`, rideId);
+            return updatedRide;
+
+        } catch (error) {
+            console.error('❌ Error updating ride status:', error);
+            throw error;
+        }
+    },
+
+    /**
+     * Complete a ride and move to completed collection
+     * Called when delivery is finished and customer confirms
+     */
+    async completeRide(rideId, ratingData = {}) {
+        try {
+            const acceptedRef = db.collection('rides').doc('accepted').collection('rides');
+            
+            let docId = null;
+            let rideDoc = null;
+
+            // Find ride in accepted collection
+            if (rideId.includes('-') && !rideId.startsWith('RIDE-')) {
+                const doc = await acceptedRef.doc(rideId).get();
+                if (doc.exists) {
+                    rideDoc = { id: doc.id, ...doc.data() };
+                    docId = doc.id;
+                }
+            }
+
+            if (!rideDoc) {
+                const snapshot = await acceptedRef.where('rideId', '==', rideId).limit(1).get();
+                if (!snapshot.empty) {
+                    const doc = snapshot.docs[0];
+                    rideDoc = { id: doc.id, ...doc.data() };
+                    docId = doc.id;
+                }
+            }
+
+            if (!rideDoc) {
+                console.error(`❌ Ride ${rideId} not found in accepted collection for completion`);
+                return null;
+            }
+
+            // Prepare completed ride doc
+            const completedRideDoc = {
+                ...rideDoc,
+                status: 'COMPLETED',
+                rating: ratingData.rating || null,
+                feedback: ratingData.feedback || null,
+                riderRating: ratingData.riderRating || null,
+                riderFeedback: ratingData.riderFeedback || null,
+                completedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+
+            // Write to completed subcollection
+            const completedRef = db.collection('rides').doc('completed').collection('rides').doc(docId);
+            await completedRef.set(completedRideDoc);
+
+            // Delete from accepted
+            await acceptedRef.doc(docId).delete();
+
+            // Update legacy collection
+            await db.collection('rides').doc(docId).update({
+                ...completedRideDoc
+            });
+            await db.collection('customer-rides').doc(docId).update({
+                ...completedRideDoc
+            });
+
+            console.log('✅ Ride completed and moved to completed collection:', rideId);
+            return completedRideDoc;
+
+        } catch (error) {
+            console.error('❌ Error completing ride:', error);
+            throw error;
+        }
+    },
+
+    /**
+     * Get all pending rides available for riders to accept
+     */
+    async getPendingRides() {
+        try {
+            const snapshot = await db.collection('rides').doc('pending').collection('rides')
+                .where('status', '==', 'REQUESTED')
+                .get();
+
+            if (!snapshot.empty) {
+                return snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+            }
+
+            return [];
+        } catch (error) {
+            console.error('❌ Error getting pending rides:', error);
+            return [];
+        }
+    },
+
+    /**
+     * Get all accepted rides for a specific rider
+     */
+    async getAcceptedRidesByRider(riderId) {
+        try {
+            const snapshot = await db.collection('rides').doc('accepted').collection('rides')
+                .where('riderId', '==', riderId)
+                .get();
+
+            if (!snapshot.empty) {
+                return snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            }
+
+            return [];
+        } catch (error) {
+            console.error('❌ Error getting accepted rides for rider:', error);
+            return [];
+        }
+    },
+
+    /**
+     * Get all accepted rides for a specific customer
+     */
+    async getAcceptedRidesByCustomer(userId) {
+        try {
+            const snapshot = await db.collection('rides').doc('accepted').collection('rides')
+                .where('userId', '==', userId)
+                .get();
+
+            if (!snapshot.empty) {
+                return snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            }
+
+            return [];
+        } catch (error) {
+            console.error('❌ Error getting accepted rides for customer:', error);
+            return [];
+        }
+    },
+
+    /**
+     * Get ride history for a user (both customer and rider history)
+     */
+    async getRideHistory(userId, userType = 'customer', limit = 20, offset = 0) {
+        try {
+            const completedRef = db.collection('rides').doc('completed').collection('rides');
+            
+            let query = completedRef;
+            if (userType === 'customer') {
+                query = query.where('userId', '==', userId);
+            } else if (userType === 'rider') {
+                query = query.where('riderId', '==', userId);
+            }
+
+            const snapshot = await query
+                .orderBy('completedAt', 'desc')
+                .limit(limit)
+                .offset(offset)
+                .get();
+
+            if (!snapshot.empty) {
+                return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            }
+
+            return [];
+        } catch (error) {
+            console.error('❌ Error getting ride history:', error);
+            return [];
+        }
+    },
+
+    /**
+     * Get active rides for a customer (pending or accepted)
+     */
+    async getActiveRideForCustomer(userId) {
+        try {
+            // Check pending first
+            let snapshot = await db.collection('rides').doc('pending').collection('rides')
+                .where('userId', '==', userId)
+                .get();
+
+            if (!snapshot.empty) {
+                const doc = snapshot.docs[0];
+                return { id: doc.id, location: 'pending', ...doc.data() };
+            }
+
+            // Then check accepted
+            snapshot = await db.collection('rides').doc('accepted').collection('rides')
+                .where('userId', '==', userId)
+                .get();
+
+            if (!snapshot.empty) {
+                const doc = snapshot.docs[0];
+                return { id: doc.id, location: 'accepted', ...doc.data() };
+            }
+
+            return null;
+        } catch (error) {
+            console.error('❌ Error getting active ride for customer:', error);
+            return null;
+        }
+    },
+
+    /**
+     * Calculate earnings for a rider over a period
+     */
+    async getRiderEarnings(riderId, periodDays = 7) {
+        try {
+            const startDate = new Date();
+            startDate.setDate(startDate.getDate() - periodDays);
+
+            const snapshot = await db.collection('rides').doc('completed').collection('rides')
+                .where('riderId', '==', riderId)
+                .where('completedAt', '>=', startDate.toISOString())
+                .get();
+
+            if (!snapshot.empty) {
+                const rides = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                const totalEarnings = rides.reduce((sum, ride) => sum + (ride.fare || 0), 0);
+                const totalRides = rides.length;
+
+                return {
+                    totalEarnings,
+                    totalRides,
+                    averagePerRide: totalRides > 0 ? totalEarnings / totalRides : 0,
+                    rides
+                };
+            }
+
+            return {
+                totalEarnings: 0,
+                totalRides: 0,
+                averagePerRide: 0,
+                rides: []
+            };
+        } catch (error) {
+            console.error('❌ Error calculating rider earnings:', error);
+            return null;
+        }
+    },
 };
 
 // Export a mock db object for compatibility with existing code
