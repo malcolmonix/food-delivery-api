@@ -19,6 +19,8 @@ const typeDefs = gql`
     latitude: Float
     longitude: Float
     isOnline: Boolean
+    averageRating: Float      # Rider's average customer rating (1-5)
+    totalRatings: Int         # Total number of ratings received
     addresses: [Address!]!
     createdAt: String!
     updatedAt: String!
@@ -224,6 +226,7 @@ const typeDefs = gql`
     riderEarnings(periodDays: Int): RiderEarnings!  # Get rider's earnings
     riderOrderHistory(limit: Int, offset: Int): [Ride!]! # Get rider's completed deliveries
     riderRides: [Ride!]!
+    availableRides: [Ride!]!  # Get available rides for riders to accept (Phase 3)
   }
 
   type Mutation {
@@ -434,14 +437,14 @@ const resolvers = {
         console.error('❌ ME RESOLVER: No user in context');
         return null;
       }
-      
+
       console.log('🔍 ME RESOLVER: User object keys:', Object.keys(user));
       console.log('🔍 ME RESOLVER: Looking up user:', user.uid, 'Email:', user.email, 'Name:', user.name);
-      
+
       // Check if user exists in Firestore
       let userDoc = await dbHelpers.getUserByUid(user.uid);
       console.log('🔍 ME RESOLVER: User doc found:', !!userDoc);
-      
+
       // If not, create from Firebase Auth data
       if (!userDoc) {
         console.log('✅ ME RESOLVER: Creating new user');
@@ -458,7 +461,7 @@ const resolvers = {
         userDoc = await dbHelpers.getUserByUid(user.uid);
         console.log('🔍 ME RESOLVER: User doc after creation:', !!userDoc);
       }
-      
+
       console.log('✅ ME RESOLVER: Calling getUserById');
       const result = await getUserById(user.uid);
       console.log('🔍 ME RESOLVER: Final result:', !!result);
@@ -737,7 +740,7 @@ const resolvers = {
 
       // Query pending rides (new Phase 3 structure)
       const pendingRides = await dbHelpers.getPendingRides();
-      
+
       // Fallback to legacy getAvailableRides for backward compatibility
       if (!pendingRides || pendingRides.length === 0) {
         console.log('ℹ️ No pending rides found, checking legacy collection...');
@@ -749,22 +752,23 @@ const resolvers = {
     },
 
     /**
-     * Get rides assigned to authenticated rider (Phase 3: from accepted subcollection)
+     * Get all rides assigned to authenticated rider (historical + active)
+     * Uses same data source as earnings for consistency
      */
     riderRides: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
 
-      // Query accepted rides for this rider (new Phase 3 structure)
-      const acceptedRides = await dbHelpers.getAcceptedRidesByRider(user.uid);
-      
-      // Fallback to legacy getRidesByRiderId for backward compatibility
-      if (!acceptedRides || acceptedRides.length === 0) {
-        console.log('ℹ️ No accepted rides found, checking legacy collection...');
-        const legacyRides = await dbHelpers.getRidesByRiderId(user.uid);
-        return legacyRides;
-      }
+      // Get all rides for this rider from main collection
+      const allRides = await dbHelpers.getRidesByRiderId(user.uid);
 
-      return acceptedRides;
+      // Sort by createdAt descending (newest first)
+      allRides.sort((a, b) => {
+        const dateA = new Date(a.createdAt || 0);
+        const dateB = new Date(b.createdAt || 0);
+        return dateB - dateA;
+      });
+
+      return allRides;
     },
 
     /**
@@ -788,18 +792,49 @@ const resolvers = {
     },
 
     /**
-     * Get earnings for authenticated rider (Phase 3)
+     * Get earnings for authenticated rider
+     * Uses same data source as riderRides (main rides collection) for consistency
      */
     riderEarnings: async (_, { periodDays = 7 }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
-      const earnings = await dbHelpers.getRiderEarnings(user.uid, periodDays);
-      return earnings || {
-        totalEarnings: 0,
-        totalRides: 0,
-        averagePerRide: 0,
-        rides: []
-      };
+      try {
+        // Get all rides for this rider (same source as history page)
+        const allRides = await dbHelpers.getRidesByRiderId(user.uid);
+
+        // Filter to only COMPLETED rides within the period
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - periodDays);
+        startDate.setHours(0, 0, 0, 0);
+
+        const completedRides = allRides.filter(ride => {
+          if (ride.status !== 'COMPLETED') return false;
+          const rideDate = new Date(ride.updatedAt || ride.createdAt);
+          return rideDate >= startDate;
+        });
+
+        // Calculate earnings
+        const totalEarnings = completedRides.reduce((sum, ride) => sum + (ride.fare || 0), 0);
+        const totalRides = completedRides.length;
+        const averagePerRide = totalRides > 0 ? totalEarnings / totalRides : 0;
+
+        console.log(`📊 Rider earnings for ${periodDays} days: ₦${totalEarnings} from ${totalRides} rides`);
+
+        return {
+          totalEarnings,
+          totalRides,
+          averagePerRide,
+          rides: completedRides
+        };
+      } catch (error) {
+        console.error('❌ Error calculating rider earnings:', error);
+        return {
+          totalEarnings: 0,
+          totalRides: 0,
+          averagePerRide: 0,
+          rides: []
+        };
+      }
     },
 
     /**
@@ -2166,7 +2201,7 @@ const resolvers = {
         // Find the ride in accepted collection first
         let ride = await dbHelpers.getAcceptedRidesByRider(user.uid)
           .then(rides => rides.find(r => r.rideId === rideId || r.id === rideId));
-        
+
         // If not found, try customer's rides
         if (!ride) {
           ride = await dbHelpers.getAcceptedRidesByCustomer(user.uid)
@@ -2364,29 +2399,63 @@ const resolvers = {
       if (!user) throw new Error('Authentication required');
 
       try {
-        // Look for completed ride
-        const completedRides = await dbHelpers.getRideHistory(user.uid, 'customer', 100, 0)
-          .then(rides => rides.filter(r => r.rideId === rideId || r.id === rideId));
+        // Find the ride in main collection
+        const ride = await dbHelpers.getRideById(rideId);
 
-        if (!completedRides || completedRides.length === 0) {
-          throw new Error('Completed ride not found');
+        if (!ride) {
+          throw new Error('Ride not found');
         }
-
-        const ride = completedRides[0];
 
         // Only customer can rate
         if (ride.userId !== user.uid) {
           throw new Error('Only the customer can rate the ride');
         }
 
-        // Update the completed ride with customer rating
-        const ratingData = {
-          rating: Math.min(Math.max(rating, 1), 5), // Clamp 1-5
-          feedback: feedback || null
-        };
+        // Only completed rides can be rated
+        if (ride.status !== 'COMPLETED') {
+          throw new Error('Can only rate completed rides');
+        }
 
-        // For now, update using legacy method (will be replaced with direct subcollection update)
-        await dbHelpers.updateRide(ride.id, ratingData);
+        // Clamp rating 1-5
+        const clampedRating = Math.min(Math.max(rating, 1), 5);
+
+        // Update the ride with customer rating
+        await dbHelpers.updateRide(ride.id, {
+          rating: clampedRating,
+          feedback: feedback || null
+        });
+
+        // INDUSTRY STANDARD: Calculate new rider average rating
+        // Formula: newAvg = ((oldAvg * totalRatings) + newRating) / (totalRatings + 1)
+        if (ride.riderId) {
+          try {
+            const riderDoc = await dbHelpers.getUserByUid(ride.riderId);
+            const currentAvg = riderDoc?.averageRating || 0;
+            const currentTotal = riderDoc?.totalRatings || 0;
+
+            const newTotal = currentTotal + 1;
+            const newAverage = ((currentAvg * currentTotal) + clampedRating) / newTotal;
+
+            const ratingUpdate = {
+              averageRating: Math.round(newAverage * 10) / 10, // Round to 1 decimal
+              totalRatings: newTotal,
+              updatedAt: new Date().toISOString()
+            };
+
+            // Update users collection (API profile)
+            await dbHelpers.updateUser(ride.riderId, ratingUpdate);
+
+            // Also update riders collection (RiderMi reads from this)
+            const { admin } = require('./firebase');
+            const ridersDb = admin.firestore();
+            await ridersDb.collection('riders').doc(ride.riderId).set(ratingUpdate, { merge: true });
+
+            console.log(`⭐ Rider ${ride.riderId} average rating updated: ${newAverage.toFixed(1)} (${newTotal} ratings)`);
+          } catch (ratingErr) {
+            console.error('Failed to update rider average rating:', ratingErr);
+            // Don't fail the whole operation if rating update fails
+          }
+        }
 
         return await dbHelpers.getRideById(ride.id);
       } catch (e) {
