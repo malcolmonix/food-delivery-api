@@ -1,5 +1,5 @@
 const { gql } = require('apollo-server-express');
-const { dbHelpers, generateId } = require('./database.firestore');
+const { dbHelpers, generateId } = require('./database.supabase');
 const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -166,9 +166,17 @@ const typeDefs = gql`
     feedback: String
     deliveryCode: String
     rider: RiderInfo
+    user: UserInfo
     location: String      # Phase 3: subcollection location (pending/accepted/completed)
     createdAt: String!
     updatedAt: String!
+  }
+
+  type UserInfo {
+    id: ID!
+    displayName: String
+    phoneNumber: String
+    photoURL: String
   }
 
   type RiderInfo {
@@ -846,6 +854,24 @@ const resolvers = {
       const history = await dbHelpers.getRideHistory(user.uid, 'rider', limit, offset);
       return history;
     },
+  },
+  Ride: {
+    user: async (ride) => {
+      if (!ride.userId) return null;
+      try {
+        const user = await dbHelpers.getUserByUid(ride.userId);
+        if (!user) return null;
+        return {
+          id: user.uid,
+          displayName: user.displayName,
+          phoneNumber: user.phoneNumber,
+          photoURL: user.photoURL
+        };
+      } catch (e) {
+        console.error('Error fetching ride user:', e);
+        return null;
+      }
+    }
   },
   Mutation: {
     /**
@@ -2066,6 +2092,14 @@ const resolvers = {
 
       try {
         console.log('🚀 requestRide mutation started for user:', user.uid);
+
+        // Check if user already has an active ride
+        const activeRide = await dbHelpers.getActiveRideForCustomer(user.uid);
+        if (activeRide) {
+          console.warn('⚠️ User already has an active ride:', activeRide.rideId);
+          // throw new Error('You already have an active ride. Please complete or cancel it first.');
+          return activeRide; // Return existing ride instead of erroring, for better UX persistence
+        }
 
         const rideData = {
           userId: user.uid,

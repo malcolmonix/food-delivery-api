@@ -5,7 +5,7 @@
 
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const { dbHelpers } = require('./database');
+const { dbHelpers } = require('./database.supabase');
 
 // JWT Secret - in production, this should be in environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -42,7 +42,7 @@ function generateToken(user) {
     email: user.email,
     displayName: user.displayName,
   };
-  
+
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
@@ -66,16 +66,16 @@ function verifyToken(token) {
  */
 async function register(userData) {
   const { email, password, displayName, phoneNumber } = userData;
-  
+
   // Check if user already exists
-  const existingUser = dbHelpers.getUserByEmail(email);
+  const existingUser = await dbHelpers.getUserByEmail(email);
   if (existingUser) {
     throw new Error('User with this email already exists');
   }
-  
+
   // Hash password
   const hashedPassword = await hashPassword(password);
-  
+
   // Create user
   const uid = `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const newUser = {
@@ -88,15 +88,15 @@ async function register(userData) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  
-  dbHelpers.createUser(newUser);
-  
+
+  await dbHelpers.createUser(newUser);
+
   // Generate token
   const token = generateToken(newUser);
-  
+
   // Remove password from response
   const { password: _, ...userWithoutPassword } = newUser;
-  
+
   return {
     user: {
       id: uid,
@@ -115,26 +115,26 @@ async function register(userData) {
  */
 async function login(email, password) {
   // Get user by email
-  const user = dbHelpers.getUserByEmail(email);
+  const user = await dbHelpers.getUserByEmail(email);
   if (!user) {
     throw new Error('Invalid email or password');
   }
-  
+
   // Verify password
   const isValidPassword = await comparePassword(password, user.password);
   if (!isValidPassword) {
     throw new Error('Invalid email or password');
   }
-  
+
   // Generate token
   const token = generateToken(user);
-  
+
   // Get user addresses
-  const addresses = dbHelpers.getAddressesByUserId(user.uid);
-  
+  const addresses = await dbHelpers.getAddressesByUserId(user.uid);
+
   // Remove password from response
   const { password: _, ...userWithoutPassword } = user;
-  
+
   return {
     user: {
       id: user.uid,
@@ -153,14 +153,14 @@ async function login(email, password) {
  * @param {string} uid - User UID
  * @returns {Object|null} User object without password
  */
-function getUserById(uid) {
-  const user = dbHelpers.getUserByUid(uid);
+async function getUserById(uid) {
+  const user = await dbHelpers.getUserByUid(uid);
   if (!user) return null;
-  
-  const addresses = dbHelpers.getAddressesByUserId(uid);
-  
+
+  const addresses = await dbHelpers.getAddressesByUserId(uid);
+
   const { password: _, ...userWithoutPassword } = user;
-  
+
   return {
     id: uid,
     ...userWithoutPassword,
