@@ -859,6 +859,10 @@ const dbHelpers = {
 
     // ==================== RIDE OPERATIONS ====================
 
+    async createRideRequest(rideData) {
+        return this.createRide(rideData);
+    },
+
     async createRide(rideData) {
         const id = generateId();
         const rideId = `RIDE-${Date.now()}`;
@@ -904,6 +908,22 @@ const dbHelpers = {
 
         if (error && error.code !== 'PGRST116') {
             console.error('❌ Supabase getRideById error:', error);
+            return null;
+        }
+        if (!data) return null;
+
+        return this._mapRide(data);
+    },
+
+    async getRideByRideId(rideId) {
+        const { data, error } = await supabase
+            .from('rides')
+            .select('*')
+            .eq('ride_id', rideId)
+            .single();
+
+        if (error && error.code !== 'PGRST116') {
+            console.error('❌ Supabase getRideByRideId error:', error);
             return null;
         }
         if (!data) return null;
@@ -988,6 +1008,79 @@ const dbHelpers = {
         }
 
         return this.getRideById(id);
+    },
+
+    async acceptRide(rideId, riderId) {
+        let id = rideId;
+        if (typeof rideId === 'string' && rideId.startsWith('RIDE-')) {
+            const ride = await this.getRideByRideId(rideId);
+            if (ride) id = ride.id;
+        }
+
+        const riderInfo = await this.getUserByUid(riderId);
+
+        return this.updateRide(id, {
+            riderId,
+            riderName: riderInfo?.displayName || 'Unknown Rider',
+            riderPhone: riderInfo?.phoneNumber || null,
+            riderPhoto: riderInfo?.photoURL || null,
+            status: 'ACCEPTED',
+            acceptedAt: new Date().toISOString()
+        });
+    },
+
+    async updateRideStatus(rideId, status) {
+        // In Supabase, we use id usually, but for backward compatibility
+        // we might receive ride_id or internal id.
+        let id = rideId;
+        if (typeof rideId === 'string' && rideId.startsWith('RIDE-')) {
+            const ride = await this.getRideByRideId(rideId);
+            if (ride) id = ride.id;
+        }
+
+        return this.updateRide(id, { status });
+    },
+
+    async completeRide(rideId, ratingData = {}) {
+        let id = rideId;
+        if (typeof rideId === 'string' && rideId.startsWith('RIDE-')) {
+            const ride = await this.getRideByRideId(rideId);
+            if (ride) id = ride.id;
+        }
+
+        return this.updateRide(id, {
+            status: 'COMPLETED',
+            ...ratingData,
+            completedAt: new Date().toISOString()
+        });
+    },
+
+    async getAcceptedRidesByRider(riderId) {
+        const { data, error } = await supabase
+            .from('rides')
+            .select('*')
+            .eq('rider_id', riderId)
+            .in('status', ['ACCEPTED', 'ARRIVED_AT_PICKUP', 'PICKED_UP', 'ARRIVED_AT_DROPOFF']);
+
+        if (error) {
+            console.error('❌ Supabase getAcceptedRidesByRider error:', error);
+            return [];
+        }
+        return data.map(r => this._mapRide(r));
+    },
+
+    async getAcceptedRidesByCustomer(userId) {
+        const { data, error } = await supabase
+            .from('rides')
+            .select('*')
+            .eq('user_id', userId)
+            .in('status', ['ACCEPTED', 'ARRIVED_AT_PICKUP', 'PICKED_UP', 'ARRIVED_AT_DROPOFF']);
+
+        if (error) {
+            console.error('❌ Supabase getAcceptedRidesByCustomer error:', error);
+            return [];
+        }
+        return data.map(r => this._mapRide(r));
     },
 
     async updateUserLocation(uid, latitude, longitude) {
