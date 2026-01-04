@@ -2635,7 +2635,62 @@ const resolvers = {
     },
     sendMessage: async (_, { rideId, text }, { user }) => {
       if (!user) throw new Error('Authentication required');
-      return dbHelpers.createMessage(rideId, user.uid, text);
+
+      const message = await dbHelpers.createMessage(rideId, user.uid, text);
+
+      // Async notification sending (fire and forget)
+      (async () => {
+        try {
+          // Get Ride Details to find the recipient
+          let ride = await dbHelpers.getRideByRideId(rideId);
+          if (!ride && dbHelpers.getRideById) {
+            const r = await dbHelpers.getRideById(rideId);
+            if (r) ride = dbHelpers._mapRide(r);
+          }
+
+          if (!ride) {
+            console.warn(`Could not find ride ${rideId} for notification`);
+            return;
+          }
+
+          const isSenderRider = user.uid === ride.riderId;
+          const recipientId = isSenderRider ? ride.userId : ride.riderId;
+
+          if (!recipientId) return;
+
+          // Fetch recipient's FCM Token from Firestore
+          // Riders are in 'riders', Users are in 'users'
+          // We check both collections or deduce from sender type
+          const collection = isSenderRider ? 'users' : 'riders';
+          const userDoc = await admin.firestore().collection(collection).doc(recipientId).get();
+
+          const fcmToken = userDoc.exists ? userDoc.data().fcmToken : null;
+
+          if (fcmToken) {
+            const payload = {
+              token: fcmToken,
+              notification: {
+                title: isSenderRider ? 'Driver' : 'Customer',
+                body: text,
+              },
+              data: {
+                type: 'CHAT_MESSAGE',
+                rideId: rideId,
+                senderId: user.uid
+              }
+            };
+
+            await admin.messaging().send(payload);
+            console.log(`🔔 FCM Push sent to ${recipientId}`);
+          } else {
+            console.log(`🔕 No FCM token for ${recipientId} in ${collection}`);
+          }
+        } catch (err) {
+          console.error('Error sending FCM notification:', err);
+        }
+      })();
+
+      return message;
     },
   },
 };
