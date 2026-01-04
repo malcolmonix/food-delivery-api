@@ -1010,11 +1010,38 @@ const dbHelpers = {
         return this.getRideById(id);
     },
 
+    async deleteRide(id) {
+        const { error } = await supabase
+            .from('rides')
+            .delete()
+            .eq('id', id);
+
+        if (error) {
+            console.error('❌ Supabase deleteRide error:', error);
+            throw error;
+        }
+
+        console.log(`✅ Ride ${id} deleted from database`);
+        return true;
+    },
+
     async acceptRide(rideId, riderId) {
         let id = rideId;
+        let ride = null;
+
         if (typeof rideId === 'string' && rideId.startsWith('RIDE-')) {
-            const ride = await this.getRideByRideId(rideId);
+            ride = await this.getRideByRideId(rideId);
             if (ride) id = ride.id;
+        } else {
+            ride = await this.getRideById(rideId);
+        }
+
+        if (!ride) throw new Error('Ride not found');
+
+        // Prevent race condition: Ensure ride is still REQUESTED and has no rider
+        if (ride.status !== 'REQUESTED' || ride.riderId) {
+            console.warn(`🛑 Ride ${rideId} already accepted by ${ride.riderId}. Request by ${riderId} denied.`);
+            return null; // Return null to indicate failure (or throw error)
         }
 
         const riderInfo = await this.getUserByUid(riderId);

@@ -840,13 +840,22 @@ const resolvers = {
     activeRiderRide: async (_, __, { user }) => {
       if (!user) throw new Error('Authentication required');
 
+      console.log(`🔎 activeRiderRide called for rider: ${user.uid} (${user.email})`);
+
       // Get all rides for rider
       const rides = await dbHelpers.getRidesByRiderId(user.uid);
+      console.log(`🔎 Found ${rides.length} rides for rider ${user.uid}`);
 
       // Find one that is active (not COMPLETED or CANCELLED)
       const activeRide = rides.find(r =>
         ['ACCEPTED', 'ARRIVED_AT_PICKUP', 'PICKED_UP', 'ARRIVED_AT_DROPOFF'].includes(r.status)
       );
+
+      if (activeRide) {
+        console.log(`✅ activeRiderRide returning ride ${activeRide.rideId} (status: ${activeRide.status}) for rider ${user.uid}`);
+      } else {
+        console.log(`❌ No active ride found for rider ${user.uid}`);
+      }
 
       return activeRide || null;
     },
@@ -2492,14 +2501,20 @@ const resolvers = {
         // Only user can cancel
         if (ride.userId !== user.uid) throw new Error('Access denied');
 
-        await dbHelpers.updateRide(ride.id, {
-          status: 'CANCELLED',
-        });
+        // Only allow cancellation if ride hasn't been picked up yet
+        if (['PICKED_UP', 'ARRIVED_AT_DROPOFF', 'COMPLETED'].includes(ride.status)) {
+          throw new Error('Cannot cancel ride after pickup');
+        }
 
-        return await dbHelpers.getRideById(ride.id);
+        // Delete the ride from database so it disappears from rider's view immediately
+        await dbHelpers.deleteRide(ride.id);
+        console.log(`🗑️ Ride ${rideId} deleted by user ${user.uid}`);
+
+        // Return a minimal response indicating success
+        return { ...ride, status: 'CANCELLED' };
       } catch (e) {
         console.error('cancelRide error:', e);
-        throw new Error('Failed to cancel ride');
+        throw new Error('Failed to cancel ride: ' + e.message);
       }
     },
 
