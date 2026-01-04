@@ -1191,6 +1191,52 @@ const dbHelpers = {
             averagePerRide: totalRides > 0 ? totalEarnings / totalRides : 0,
             rides
         };
+    },
+
+    // ==================== MESSAGE OPERATIONS ====================
+
+    async getMessagesByRideId(rideId) {
+        const { data, error } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('ride_id', rideId)
+            .order('created_at', { ascending: true });
+
+        if (error) {
+            console.error('❌ Supabase getMessagesByRideId error:', error);
+            return [];
+        }
+
+        return data.map(msg => ({
+            ...msg,
+            rideId: msg.ride_id,
+            senderId: msg.sender_id,
+            createdAt: msg.created_at
+        }));
+    },
+
+    async createMessage(rideId, senderId, text) {
+        const { data, error } = await supabase
+            .from('messages')
+            .insert({
+                ride_id: rideId,
+                sender_id: senderId,
+                text
+            })
+            .select()
+            .single();
+
+        if (error) {
+            console.error('❌ Supabase createMessage error:', error);
+            throw error;
+        }
+
+        return {
+            ...data,
+            rideId: data.ride_id,
+            senderId: data.sender_id,
+            createdAt: data.created_at
+        };
     }
 };
 

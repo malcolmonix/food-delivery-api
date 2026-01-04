@@ -195,6 +195,14 @@ const typeDefs = gql`
     rides: [Ride!]!
   }
 
+  type Message {
+    id: ID!
+    rideId: String!
+    senderId: String!
+    text: String!
+    createdAt: String!
+  }
+
   input RideInput {
     pickupAddress: String!
     pickupLat: Float!
@@ -235,6 +243,10 @@ const typeDefs = gql`
     riderOrderHistory(limit: Int, offset: Int): [Ride!]! # Get rider's completed deliveries
     riderRides: [Ride!]!
     availableRides: [Ride!]!  # Get available rides for riders to accept (Phase 3)
+    activeRiderRide: Ride     # Get rider's current active ride
+
+    # Chat Queries
+    messages(rideId: ID!): [Message!]!
   }
 
   type Mutation {
@@ -382,6 +394,9 @@ const typeDefs = gql`
     updateRiderStatus(isOnline: Boolean!): User!
     cancelRide(rideId: ID!, reason: String): Ride!
     rateRide(rideId: ID!, rating: Int!, feedback: String): Ride!
+
+    # Chat Mutations
+    sendMessage(rideId: ID!, text: String!): Message!
   }
 
   input OpeningHourInput {
@@ -433,6 +448,34 @@ const typeDefs = gql`
     total: Float!
   }
 `;
+
+/**
+ * Ensures a Firebase user is synchronized to the Supabase users table.
+ * @param {Object} user - User object from context (Firebase)
+ */
+async function ensureUserSynced(user) {
+  if (!user || !user.uid) return;
+
+  try {
+    const existing = await dbHelpers.getUserByUid(user.uid);
+    if (!existing) {
+      console.log(`👤 Syncing new user to Supabase: ${user.uid} (${user.email || 'no-email'})`);
+      await dbHelpers.createUser({
+        uid: user.uid,
+        email: user.email || `${user.uid}@placeholder.com`,
+        displayName: user.displayName || user.name || 'Customer',
+        photoURL: user.photoURL || null,
+        phoneNumber: user.phoneNumber || null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+  } catch (error) {
+    console.warn(`⚠️ Failed to sync user ${user.uid} to Supabase:`, error.message);
+    // We don't throw here to avoid blocking mutations if sync fails for non-FK reasons,
+    // though for these specific mutations, it might still fail later due to the constraint.
+  }
+}
 
 const resolvers = {
   Query: {
@@ -688,7 +731,12 @@ const resolvers = {
     ride: async (_, { id }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
-      const ride = await dbHelpers.getRideById(id);
+      let ride = await dbHelpers.getRideById(id);
+      if (!ride) {
+        // Try lookup by public rideId (e.g. RIDE-12345678)
+        ride = await dbHelpers.getRideByRideId(id);
+      }
+
       if (!ride) return null;
 
       // Allow access if:
@@ -789,6 +837,20 @@ const resolvers = {
       return activeRide;
     },
 
+    activeRiderRide: async (_, __, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      // Get all rides for rider
+      const rides = await dbHelpers.getRidesByRiderId(user.uid);
+
+      // Find one that is active (not COMPLETED or CANCELLED)
+      const activeRide = rides.find(r =>
+        ['ACCEPTED', 'ARRIVED_AT_PICKUP', 'PICKED_UP', 'ARRIVED_AT_DROPOFF'].includes(r.status)
+      );
+
+      return activeRide || null;
+    },
+
     /**
      * Get ride history for authenticated customer (Phase 3)
      */
@@ -853,6 +915,11 @@ const resolvers = {
 
       const history = await dbHelpers.getRideHistory(user.uid, 'rider', limit, offset);
       return history;
+    },
+
+    messages: async (_, { rideId }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      return dbHelpers.getMessagesByRideId(rideId);
     },
   },
   Ride: {
@@ -1036,6 +1103,9 @@ const resolvers = {
       if (!user) throw new Error('Authentication required');
 
       try {
+        // Ensure user exists in Supabase
+        await ensureUserSynced(user);
+
         const addressData = {
           userId: user.uid,
           label,
@@ -1137,6 +1207,9 @@ const resolvers = {
       if (!user) throw new Error('Authentication required');
 
       try {
+        // Ensure user exists in Supabase
+        await ensureUserSynced(user);
+
         // Calculate total amount
         const orderAmount = orderInput.reduce((total, item) => total + item.total, 0);
         const totalCharges = (deliveryCharges || 0) + (tipping || 0) + (taxationAmount || 0);
@@ -2093,6 +2166,9 @@ const resolvers = {
       try {
         console.log('🚀 requestRide mutation started for user:', user.uid);
 
+        // Ensure user exists in Supabase before creating ride
+        await ensureUserSynced(user);
+
         // Check if user already has an active ride
         const activeRide = await dbHelpers.getActiveRideForCustomer(user.uid);
         if (activeRide) {
@@ -2189,6 +2265,7 @@ const resolvers = {
      */
     acceptRide: async (_, { rideId }, { user }) => {
       if (!user) throw new Error('Authentication required');
+      await ensureUserSynced(user);
 
       try {
         console.log('🎯 acceptRide called with rideId:', rideId, 'by rider:', user.uid);
@@ -2555,6 +2632,10 @@ const resolvers = {
         }
         throw new Error('Failed to import image: ' + error.message);
       }
+    },
+    sendMessage: async (_, { rideId, text }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      return dbHelpers.createMessage(rideId, user.uid, text);
     },
   },
 };

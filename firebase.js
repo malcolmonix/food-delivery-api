@@ -50,13 +50,18 @@ if (hasValidCredentials) {
     admin_instance = admin;
     db = admin.firestore();
 
-    // Initialize Storage bucket
-    try {
-      bucket = admin.storage().bucket(`${serviceAccount.project_id}.appspot.com`);
-      console.log('✅ Firebase initialized successfully with Storage');
-    } catch (error) {
-      console.warn('⚠️  Firebase Storage initialization failed:', error.message);
-      console.log('✅ Firebase initialized successfully (without Storage)');
+    // Initialize Storage bucket (conditionally)
+    if (process.env.ENABLE_FIREBASE_STORAGE === 'true') {
+      try {
+        bucket = admin.storage().bucket(`${serviceAccount.project_id}.appspot.com`);
+        console.log('✅ Firebase initialized successfully with Storage');
+      } catch (error) {
+        console.warn('⚠️  Firebase Storage initialization failed:', error.message);
+        console.log('✅ Firebase initialized successfully (without Storage)');
+      }
+    } else {
+      console.log('ℹ️  Firebase Storage is disabled via environment variable');
+      bucket = null;
     }
     console.log('✅ Firebase initialized successfully with real credentials');
   } catch (error) {
