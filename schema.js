@@ -22,6 +22,9 @@ const typeDefs = gql`
     averageRating: Float      # Rider's average customer rating (1-5)
     totalRatings: Int         # Total number of ratings received
     addresses: [Address!]!
+    vehicleType: String
+    licensePlate: String
+    secondaryPhone: String
     createdAt: String!
     updatedAt: String!
   }
@@ -168,8 +171,19 @@ const typeDefs = gql`
     rider: RiderInfo
     user: UserInfo
     location: String      # Phase 3: subcollection location (pending/accepted/completed)
+    offers: [RideOffer!]
     createdAt: String!
     updatedAt: String!
+  }
+
+  type RideOffer {
+    id: ID!
+    riderId: String!
+    riderName: String
+    riderPhoto: String
+    amount: Float!
+    status: String! # PENDING, ACCEPTED, REJECTED
+    createdAt: String!
   }
 
   type UserInfo {
@@ -186,6 +200,9 @@ const typeDefs = gql`
     latitude: Float
     longitude: Float
     photoURL: String
+    vehicleType: String
+    licensePlate: String
+    secondaryPhone: String
   }
 
   type RiderEarnings {
@@ -397,6 +414,14 @@ const typeDefs = gql`
 
     # Chat Mutations
     sendMessage(rideId: ID!, text: String!): Message!
+
+    # Bidding Mutations
+    adjustRidePrice(rideId: ID!, amount: Float!): Ride!
+    riderCounterOffer(rideId: ID!, amount: Float!): Ride!
+    acceptRiderOffer(rideId: ID!, riderId: String!, amount: Float!): Ride!
+    
+    # Profile update specifically for rider fields
+    updateRiderProfile(vehicleType: String, licensePlate: String, secondaryPhone: String): User!
   }
 
   input OpeningHourInput {
@@ -2588,6 +2613,214 @@ const resolvers = {
         console.error('rateRide error:', e);
         throw new Error(e.message || 'Failed to rate ride');
       }
+    },
+
+    /**
+     * Adjust ride price (Customer)
+     */
+    adjustRidePrice: async (_, { rideId, amount }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      // Try doc id first, then public rideId
+      let ride = await dbHelpers.getRideById(rideId);
+      if (!ride) ride = await dbHelpers.getRideByRideId(rideId);
+
+      if (!ride) throw new Error('Ride not found');
+      if (ride.userId !== user.uid) throw new Error('Unauthorized');
+      if (ride.status !== 'REQUESTED') throw new Error('Price can only be adjusted while ride is requested');
+
+      const updatedRide = await dbHelpers.updateRide(ride.id, { fare: amount });
+
+      // Notify riders of price increase
+      if (admin && admin.messaging) {
+        (async () => {
+          try {
+            const firestore = admin.firestore();
+            const ridersSnapshot = await firestore.collection('riders').where('available', '==', true).get();
+            const tokens = [];
+            ridersSnapshot.forEach(doc => {
+              const data = doc.data();
+              if (data && data.fcmToken) tokens.push(data.fcmToken);
+            });
+
+            if (tokens.length > 0) {
+              const message = {
+                notification: {
+                  title: 'Ride Price Increased!',
+                  body: `Fare for ride from ${ride.pickupAddress} increased to ₦${amount}`,
+                },
+                data: {
+                  type: 'PRICE_UPDATE',
+                  rideId: ride.rideId,
+                  amount: amount.toString(),
+                },
+              };
+              await admin.messaging().sendMulticast({ tokens, ...message });
+            }
+          } catch (err) {
+            console.error('Failed to notify riders of price adjustment:', err);
+          }
+        })();
+      }
+
+      return updatedRide;
+    },
+
+    /**
+     * Rider counter offer
+     */
+    riderCounterOffer: async (_, { rideId, amount }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      // Try doc id first, then public rideId
+      let ride = await dbHelpers.getRideById(rideId);
+      if (!ride) ride = await dbHelpers.getRideByRideId(rideId);
+
+      if (!ride) throw new Error('Ride not found');
+      if (ride.status !== 'REQUESTED') throw new Error('Ride is no longer available');
+
+      const rider = await dbHelpers.getUserByUid(user.uid);
+
+      const newOffer = {
+        id: generateId(),
+        riderId: user.uid,
+        riderName: rider?.displayName || 'Unknown Rider',
+        riderPhoto: rider?.photoURL || null,
+        amount,
+        status: 'PENDING',
+        createdAt: new Date().toISOString()
+      };
+
+      // Override previous offers from the same rider - only keep the latest offer per rider
+      const currentOffers = ride.offers || [];
+      // Remove all previous offers from this rider (keep only PENDING status ones to override)
+      const otherRidersOffers = currentOffers.filter(o => o.riderId !== user.uid || o.status !== 'PENDING');
+      // Add the new offer
+      const updatedOffers = [...otherRidersOffers, newOffer];
+      
+      const updatedRide = await dbHelpers.updateRide(ride.id, {
+        offers: updatedOffers
+      });
+
+      // Notify customer of counter offer
+      if (admin && admin.messaging) {
+        (async () => {
+          try {
+            const customerDoc = await admin.firestore().collection('users').doc(ride.userId).get();
+            const fcmToken = customerDoc.data()?.fcmToken;
+            if (fcmToken) {
+              const message = {
+                notification: {
+                  title: 'New Counter Offer!',
+                  body: `${rider?.displayName || 'A rider'} offered ₦${amount} for your ride.`,
+                },
+                data: {
+                  type: 'COUNTER_OFFER',
+                  rideId: ride.rideId,
+                  amount: amount.toString(),
+                },
+                token: fcmToken
+              };
+              await admin.messaging().send(message);
+            }
+          } catch (err) {
+            console.error('Failed to notify customer of counter offer:', err);
+          }
+        })();
+      }
+
+      return updatedRide;
+    },
+
+    /**
+     * Accept rider offer
+     */
+    acceptRiderOffer: async (_, { rideId, riderId, amount }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      // Try doc id first, then public rideId
+      let ride = await dbHelpers.getRideById(rideId);
+      if (!ride) ride = await dbHelpers.getRideByRideId(rideId);
+
+      if (!ride) throw new Error('Ride not found');
+      if (ride.userId !== user.uid) throw new Error('Unauthorized');
+
+      const rider = await dbHelpers.getUserByUid(riderId);
+      if (!rider) throw new Error('Rider not found');
+
+      // Update ride with accepted rider and fare
+      const updatedRide = await dbHelpers.updateRide(ride.id, {
+        riderId,
+        riderName: rider.displayName,
+        riderPhone: rider.secondaryPhone || rider.phoneNumber,
+        riderPhoto: rider.photoURL,
+        fare: amount,
+        status: 'ACCEPTED',
+        acceptedAt: new Date().toISOString(),
+        offers: (ride.offers || []).map(o => ({
+          ...o,
+          status: o.riderId === riderId && o.amount === amount ? 'ACCEPTED' : 'REJECTED'
+        }))
+      });
+
+      // Notify rider their offer was accepted
+      if (admin && admin.messaging) {
+        (async () => {
+          try {
+            const riderDoc = await admin.firestore().collection('riders').doc(riderId).get();
+            const fcmToken = riderDoc.data()?.fcmToken;
+            if (fcmToken) {
+              const message = {
+                notification: {
+                  title: 'Offer Accepted!',
+                  body: `Your offer of ₦${amount} for the ride was accepted. Get ready!`,
+                },
+                data: {
+                  type: 'OFFER_ACCEPTED',
+                  rideId: ride.rideId,
+                },
+                token: fcmToken
+              };
+              await admin.messaging().send(message);
+            }
+          } catch (err) {
+            console.error('Failed to notify rider of accepted offer:', err);
+          }
+        })();
+      }
+
+      return updatedRide;
+    },
+
+    /**
+     * Update rider specific profile fields
+     */
+    updateRiderProfile: async (_, { vehicleType, licensePlate, secondaryPhone }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      const updateData = { updatedAt: new Date().toISOString() };
+      if (vehicleType !== undefined) updateData.vehicleType = vehicleType;
+      if (licensePlate !== undefined) updateData.licensePlate = licensePlate;
+      if (secondaryPhone !== undefined) updateData.secondaryPhone = secondaryPhone;
+
+      await dbHelpers.updateUser(user.uid, updateData);
+
+      // Sync to riders collection in Firestore for fast lookup
+      if (admin && admin.firestore) {
+        try {
+          const firestore = admin.firestore();
+          await firestore.collection('riders').doc(user.uid).set({
+            vehicleType,
+            licensePlate,
+            secondaryPhone,
+            updatedAt: updateData.updatedAt
+          }, { merge: true });
+        } catch (err) {
+          console.error('Failed to sync rider profile to Firestore:', err);
+        }
+      }
+
+      return await dbHelpers.getUserByUid(user.uid);
     },
 
     /**

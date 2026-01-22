@@ -59,12 +59,14 @@ const dbHelpers = {
 
         if (!data) return null;
 
-        // Map back to camelCase for compatibility
         return {
             ...data,
             displayName: data.display_name,
             phoneNumber: data.phone_number,
             photoURL: data.photo_url,
+            vehicleType: data.vehicle_type,
+            licensePlate: data.license_plate,
+            secondaryPhone: data.secondary_phone,
             createdAt: data.created_at,
             updatedAt: data.updated_at
         };
@@ -90,6 +92,9 @@ const dbHelpers = {
             displayName: data.display_name,
             phoneNumber: data.phone_number,
             photoURL: data.photo_url,
+            vehicleType: data.vehicle_type,
+            licensePlate: data.license_plate,
+            secondaryPhone: data.secondary_phone,
             createdAt: data.created_at,
             updatedAt: data.updated_at
         };
@@ -103,6 +108,9 @@ const dbHelpers = {
             display_name: cleanUpdates.displayName,
             phone_number: cleanUpdates.phoneNumber,
             photo_url: cleanUpdates.photoURL,
+            vehicle_type: cleanUpdates.vehicleType,
+            license_plate: cleanUpdates.licensePlate,
+            secondary_phone: cleanUpdates.secondaryPhone,
             updated_at: new Date().toISOString(),
             ...cleanUpdates
         };
@@ -111,6 +119,9 @@ const dbHelpers = {
         delete mappedUpdates.displayName;
         delete mappedUpdates.phoneNumber;
         delete mappedUpdates.photoURL;
+        delete mappedUpdates.vehicleType;
+        delete mappedUpdates.licensePlate;
+        delete mappedUpdates.secondaryPhone;
 
         const { error } = await supabase
             .from('users')
@@ -879,6 +890,7 @@ const dbHelpers = {
             dropoff_lng: rideData.dropoffLng,
             status: rideData.status || 'REQUESTED',
             fare: rideData.fare,
+            offers: rideData.offers || [],
             distance: rideData.distance,
             duration: rideData.duration,
             payment_method: rideData.paymentMethod || null,
@@ -1156,6 +1168,7 @@ const dbHelpers = {
             dropoffLng: ride.dropoff_lng || ride.dropoffLng,
             paymentMethod: ride.payment_method || ride.paymentMethod,
             deliveryCode: ride.delivery_code || ride.deliveryCode,
+            offers: ride.offers || [],
             createdAt: ride.created_at || ride.createdAt,
             updatedAt: ride.updated_at || ride.updatedAt
         };
