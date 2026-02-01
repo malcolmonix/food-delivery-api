@@ -485,16 +485,19 @@ const dbHelpers = {
 
   async createRide(rideData) {
     const id = generateId();
+    const rideId = `RIDE-${Date.now()}`;
     const ride = {
       id,
+      rideId,
       ...rideData,
+      status: rideData.status || 'REQUESTED',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
     storage.rides.set(id, ride);
-    console.log('✅ Ride created in memory:', id);
-    return id;
+    console.log('✅ Ride created in memory:', rideId);
+    return ride;
   },
 
   async createRideRequest(rideData) {
