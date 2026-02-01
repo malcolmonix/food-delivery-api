@@ -5,7 +5,22 @@ const { ApolloServer } = require('apollo-server-express');
 const graphqlUploadExpress = require('graphql-upload/graphqlUploadExpress.js');
 const { typeDefs, resolvers } = require('./schema');
 const { admin } = require('./firebase');
-const { dbHelpers, db } = require('./database.memory');
+
+// Dynamic database module selection based on environment
+// Priority: SUPABASE_URL > ENABLE_FIREBASE_STORAGE > memory (fallback)
+let dbModule;
+if (process.env.SUPABASE_URL) {
+  dbModule = './database.supabase';
+  console.log('🗄️  Using Supabase database (PostgreSQL)');
+} else if (process.env.ENABLE_FIREBASE_STORAGE === 'true') {
+  dbModule = './database.firestore';
+  console.log('🔥 Using Firestore database');
+} else {
+  dbModule = './database.memory';
+  console.log('🧠 Using in-memory database (development only)');
+}
+
+const { dbHelpers, db } = require(dbModule);
 
 async function startServer() {
   const app = express();

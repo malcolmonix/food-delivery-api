@@ -1,5 +1,20 @@
 const { gql } = require('apollo-server-express');
-const { dbHelpers, generateId } = require('./database.memory');
+
+// Dynamic database module selection based on environment
+// Priority: SUPABASE_URL > ENABLE_FIREBASE_STORAGE > memory (fallback)
+let dbModule;
+if (process.env.SUPABASE_URL) {
+  dbModule = './database.supabase';
+  console.log('🗄️  Using Supabase database (PostgreSQL)');
+} else if (process.env.ENABLE_FIREBASE_STORAGE === 'true') {
+  dbModule = './database.firestore';
+  console.log('🔥 Using Firestore database');
+} else {
+  dbModule = './database.memory';
+  console.log('🧠 Using in-memory database (development only)');
+}
+
+const { dbHelpers, generateId } = require(dbModule);
 const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -1097,21 +1112,23 @@ const resolvers = {
       // if (!user) throw new Error('Authentication required');
       
       try {
-        // Get all users from storage
-        const allUsers = Array.from(require('./database.memory').dbHelpers.getUserById ? [] : []);
+        // Get all users from the database (works with any database module)
+        let users = [];
         
-        // For admin panel without auth, get all users directly
-        const users = [];
+        // Try to get all users - implementation varies by database
         try {
-          // Access the storage directly from database.memory module
-          const { dbHelpers: helpers } = require('./database.memory');
-          
-          // Get all users by iterating through sample user IDs
-          const sampleUserIds = ['user-1', 'user-2', 'rider-1', 'rider-2'];
-          for (const userId of sampleUserIds) {
-            const user = await helpers.getUserById(userId);
-            if (user) {
-              users.push(user);
+          // For Supabase/Firestore, we need a proper getAllUsers method
+          // For memory database, we can iterate through sample IDs
+          if (typeof dbHelpers.getAllUsers === 'function') {
+            users = await dbHelpers.getAllUsers();
+          } else {
+            // Fallback for memory database - iterate through known sample IDs
+            const sampleUserIds = ['user-1', 'user-2', 'rider-1', 'rider-2'];
+            for (const userId of sampleUserIds) {
+              const user = await dbHelpers.getUserById(userId);
+              if (user) {
+                users.push(user);
+              }
             }
           }
         } catch (e) {
