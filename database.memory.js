@@ -522,6 +522,17 @@ const dbHelpers = {
     return this.getPendingRides();
   },
 
+  async getActiveRideForCustomer(userId) {
+    // Find active ride for this user (not COMPLETED or CANCELLED)
+    for (const [id, ride] of storage.rides) {
+      if (ride.userId === userId &&
+        !['COMPLETED', 'CANCELLED'].includes(ride.status)) {
+        return ride;
+      }
+    }
+    return null;
+  },
+
   // ==================== STATISTICS OPERATIONS ====================
 
   async getStatistics() {
