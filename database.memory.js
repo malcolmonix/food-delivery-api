@@ -509,6 +509,28 @@ const dbHelpers = {
     return storage.rides.get(id) || null;
   },
 
+  async getRideByRideId(rideId) {
+    // Find ride by rideId field (e.g., RIDE-1738454321)
+    for (const [id, ride] of storage.rides) {
+      if (ride.rideId === rideId) {
+        return ride;
+      }
+    }
+    return null;
+  },
+
+  async getRidesByUserId(userId) {
+    return Array.from(storage.rides.values())
+      .filter(ride => ride.userId === userId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  },
+
+  async getRidesByRiderId(riderId) {
+    return Array.from(storage.rides.values())
+      .filter(ride => ride.riderId === riderId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  },
+
   async updateRideStatus(rideId, status) {
     const ride = storage.rides.get(rideId);
     if (ride) {
