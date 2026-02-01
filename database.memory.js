@@ -497,6 +497,11 @@ const dbHelpers = {
     return id;
   },
 
+  async createRideRequest(rideData) {
+    // Alias for createRide - maintains compatibility with Firestore/Supabase implementations
+    return this.createRide(rideData);
+  },
+
   async getRideById(id) {
     return storage.rides.get(id) || null;
   },
