@@ -1,5 +1,5 @@
 const { gql } = require('apollo-server-express');
-const { dbHelpers, generateId } = require('./database.supabase');
+const { dbHelpers, generateId } = require('./database.memory');
 const { admin } = require('./firebase');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -54,11 +54,18 @@ const typeDefs = gql`
     contactEmail: String
     phoneNumber: String
     address: String
+    state: String
+    city: String
+    latitude: Float
+    longitude: Float
     cuisine: [String!]!
+    restaurantType: String
     priceRange: String
     rating: Float
     reviewCount: Int
     isActive: Boolean!
+    isOnline: Boolean
+    lastStatusUpdate: String
     openingHours: [OpeningHour!]!
     createdAt: String!
     updatedAt: String!
@@ -220,6 +227,41 @@ const typeDefs = gql`
     createdAt: String!
   }
 
+  type Statistics {
+    totalUsers: Int!
+    totalRestaurants: Int!
+    totalOrders: Int!
+    totalRiders: Int!
+    totalRevenue: Float!
+    averageOrderValue: Float!
+    ordersByStatus: [OrderStatusCount!]!
+    topRestaurants: [RestaurantStats!]!
+    topRiders: [RiderStats!]!
+    lastUpdated: String!
+  }
+
+  type OrderStatusCount {
+    status: String!
+    count: Int!
+    percentage: Float!
+  }
+
+  type RestaurantStats {
+    id: String!
+    name: String!
+    orderCount: Int!
+    revenue: Float!
+    averageRating: Float!
+  }
+
+  type RiderStats {
+    id: String!
+    displayName: String!
+    deliveryCount: Int!
+    earnings: Float!
+    averageRating: Float!
+  }
+
   input RideInput {
     pickupAddress: String!
     pickupLat: Float!
@@ -243,6 +285,7 @@ const typeDefs = gql`
     restaurants(search: String, cuisine: String, limit: Int, offset: Int): [Restaurant!]!
     eateriesByLocation(city: String, lat: Float, lng: Float, radiusMeters: Int, limit: Int): [Restaurant!]!
     restaurant(id: ID!): Restaurant
+    restaurantByOwner(ownerId: ID!): Restaurant  # Get restaurant by owner ID
     menuItems(restaurantId: ID!): [MenuItem!]!
     menuItem(id: ID!): MenuItem
     menuCategories(restaurantId: ID!): [MenuCategory!]!
@@ -264,6 +307,10 @@ const typeDefs = gql`
 
     # Chat Queries
     messages(rideId: ID!): [Message!]!
+    
+    # Admin Queries
+    statistics: Statistics!
+    riders(isOnline: Boolean): [User!]!  # Get all riders, optionally filter by online status
   }
 
   type Mutation {
@@ -345,7 +392,12 @@ const typeDefs = gql`
       contactEmail: String
       phoneNumber: String
       address: String
+      state: String
+      city: String
+      latitude: Float
+      longitude: Float
       cuisine: [String!]
+      restaurantType: String
       priceRange: String
       openingHours: [OpeningHourInput!]
       isActive: Boolean
@@ -545,15 +597,46 @@ const resolvers = {
     },
     /**
      * Get all orders for authenticated user
+     * TODO: Add admin-specific query for viewing all orders
      */
     orders: async (_, __, { user }) => {
-      if (!user) throw new Error('Authentication required');
+      // Temporarily allow unauthenticated access for admin panel development
+      // TODO: Re-enable authentication and add proper admin role check
+      // if (!user) throw new Error('Authentication required');
 
-      const orders = dbHelpers.getOrdersByUserId(user.uid);
+      // If no user, return all orders (for admin panel)
+      // If user exists, return only their orders (for regular users)
+      const orders = user 
+        ? dbHelpers.getOrdersByUser(user.uid)
+        : Array.from(dbHelpers.getOrdersByUser ? [] : []);
+      
+      // For admin panel without auth, return all orders from storage
+      if (!user) {
+        // Access all orders directly - this is temporary for development
+        const allOrders = [];
+        try {
+          // Try to get sample orders from the database
+          const sampleUserIds = ['user-1', 'user-2', 'user-3'];
+          for (const userId of sampleUserIds) {
+            const userOrders = await dbHelpers.getOrdersByUser(userId);
+            allOrders.push(...userOrders);
+          }
+        } catch (e) {
+          console.log('Could not fetch orders:', e.message);
+        }
+        
+        return allOrders.map(order => ({
+          ...order,
+          orderItems: JSON.parse(order.orderItems || '[]'),
+          statusHistory: JSON.parse(order.statusHistory || '[]'),
+          isPickedUp: Boolean(order.isPickedUp),
+        }));
+      }
+        
       return orders.map(order => ({
         ...order,
-        orderItems: JSON.parse(order.orderItems),
-        statusHistory: JSON.parse(order.statusHistory),
+        orderItems: JSON.parse(order.orderItems || '[]'),
+        statusHistory: JSON.parse(order.statusHistory || '[]'),
         isPickedUp: Boolean(order.isPickedUp),
       }));
     },
@@ -658,6 +741,32 @@ const resolvers = {
         };
       } catch (error) {
         console.error('Error fetching restaurant:', error);
+        throw new Error('Failed to fetch restaurant');
+      }
+    },
+    /**
+     * Get restaurant by owner ID
+     */
+    restaurantByOwner: async (_, { ownerId }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+      
+      // Only allow owners to access their own restaurant
+      if (user.uid !== ownerId) {
+        throw new Error('Access denied: Can only access your own restaurant');
+      }
+
+      try {
+        const restaurant = await dbHelpers.getRestaurantByOwnerId(ownerId);
+        if (!restaurant) return null;
+
+        return {
+          ...restaurant,
+          cuisine: JSON.parse(restaurant.cuisine || '[]'),
+          openingHours: JSON.parse(restaurant.openingHours || '[]'),
+          isActive: Boolean(restaurant.isActive),
+        };
+      } catch (error) {
+        console.error('Error fetching restaurant by owner:', error);
         throw new Error('Failed to fetch restaurant');
       }
     },
@@ -954,6 +1063,79 @@ const resolvers = {
     messages: async (_, { rideId }, { user }) => {
       if (!user) throw new Error('Authentication required');
       return dbHelpers.getMessagesByRideId(rideId);
+    },
+
+    /**
+     * Get platform statistics for admin dashboard
+     */
+    statistics: async (_, __, { user }) => {
+      // Temporarily allow unauthenticated access for testing
+      // TODO: Re-enable authentication in production
+      // if (!user) throw new Error('Authentication required');
+      
+      try {
+        const stats = await dbHelpers.getStatistics();
+        console.log('📊 Statistics requested:', {
+          totalUsers: stats.totalUsers,
+          totalRestaurants: stats.totalRestaurants,
+          totalOrders: stats.totalOrders,
+          totalRevenue: stats.totalRevenue
+        });
+        return stats;
+      } catch (error) {
+        console.error('❌ Error fetching statistics:', error);
+        throw new Error('Failed to fetch statistics');
+      }
+    },
+
+    /**
+     * Get all riders, optionally filter by online status
+     */
+    riders: async (_, { isOnline }, { user }) => {
+      // Temporarily allow unauthenticated access for admin panel development
+      // TODO: Re-enable authentication and add proper admin role check
+      // if (!user) throw new Error('Authentication required');
+      
+      try {
+        // Get all users from storage
+        const allUsers = Array.from(require('./database.memory').dbHelpers.getUserById ? [] : []);
+        
+        // For admin panel without auth, get all users directly
+        const users = [];
+        try {
+          // Access the storage directly from database.memory module
+          const { dbHelpers: helpers } = require('./database.memory');
+          
+          // Get all users by iterating through sample user IDs
+          const sampleUserIds = ['user-1', 'user-2', 'rider-1', 'rider-2'];
+          for (const userId of sampleUserIds) {
+            const user = await helpers.getUserById(userId);
+            if (user) {
+              users.push(user);
+            }
+          }
+        } catch (e) {
+          console.log('Could not fetch users:', e.message);
+        }
+        
+        // Filter for riders only
+        let riders = users.filter(u => u.userType === 'rider');
+        
+        // Apply online filter if specified
+        if (isOnline !== undefined && isOnline !== null) {
+          riders = riders.filter(r => Boolean(r.isOnline) === isOnline);
+        }
+        
+        console.log(`🏍️ Riders requested: ${riders.length} riders (isOnline filter: ${isOnline})`);
+        
+        return riders.map(rider => ({
+          ...rider,
+          addresses: [] // Riders don't have addresses in this context
+        }));
+      } catch (error) {
+        console.error('❌ Error fetching riders:', error);
+        throw new Error('Failed to fetch riders');
+      }
     },
   },
   Ride: {
@@ -1659,7 +1841,7 @@ const resolvers = {
     /**
      * Update a restaurant
      */
-    updateRestaurant: async (_, { id, name, description, contactEmail, phoneNumber, address, cuisine, priceRange, openingHours, isActive, logoUrl, bannerUrl }, { user }) => {
+    updateRestaurant: async (_, { id, name, description, contactEmail, phoneNumber, address, state, city, latitude, longitude, cuisine, restaurantType, priceRange, openingHours, isActive, logoUrl, bannerUrl }, { user }) => {
       if (!user) throw new Error('Authentication required');
 
       try {
@@ -1671,9 +1853,27 @@ const resolvers = {
         if (name !== undefined) updateData.name = name;
         if (description !== undefined) updateData.description = description;
         if (contactEmail !== undefined) updateData.contactEmail = contactEmail;
-        if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
+        if (phoneNumber !== undefined) {
+          // Validate Nigerian phone number format
+          const phoneRegex = /^(\+234|0)[789][01]\d{8}$/;
+          if (!phoneRegex.test(phoneNumber)) {
+            throw new Error('Invalid Nigerian phone number format. Use +234XXXXXXXXXX or 0XXXXXXXXXX');
+          }
+          updateData.phoneNumber = phoneNumber;
+        }
         if (address !== undefined) updateData.address = address;
+        if (state !== undefined) updateData.state = state;
+        if (city !== undefined) updateData.city = city;
+        if (latitude !== undefined) updateData.latitude = latitude;
+        if (longitude !== undefined) updateData.longitude = longitude;
         if (cuisine !== undefined) updateData.cuisine = cuisine;
+        if (restaurantType !== undefined) {
+          // Validate restaurant type
+          if (!['alacarte', 'fastfood'].includes(restaurantType)) {
+            throw new Error('Invalid restaurant type. Must be "alacarte" or "fastfood"');
+          }
+          updateData.restaurantType = restaurantType;
+        }
         if (priceRange !== undefined) updateData.priceRange = priceRange;
         if (openingHours !== undefined) updateData.openingHours = openingHours;
         if (isActive !== undefined) updateData.isActive = isActive;

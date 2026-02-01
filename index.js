@@ -5,7 +5,7 @@ const { ApolloServer } = require('apollo-server-express');
 const graphqlUploadExpress = require('graphql-upload/graphqlUploadExpress.js');
 const { typeDefs, resolvers } = require('./schema');
 const { admin } = require('./firebase');
-const { dbHelpers, db } = require('./database.supabase');
+const { dbHelpers, db } = require('./database.memory');
 
 async function startServer() {
   const app = express();
@@ -13,6 +13,9 @@ async function startServer() {
   const allowedOrigins = (process.env.CORS_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
   const defaultOrigins = [
     'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:3002',
+    'http://localhost:9001',
     'http://localhost:9002',
     'http://localhost:9010',
     'http://localhost:9011',
@@ -23,24 +26,34 @@ async function startServer() {
     'https://menuverse.vercel.app'
   ];
 
-  const originList = allowedOrigins.length ? allowedOrigins : defaultOrigins;
+  // In development, always include localhost origins
+  const originList = process.env.NODE_ENV === 'production' 
+    ? (allowedOrigins.length ? allowedOrigins : defaultOrigins)
+    : [...defaultOrigins, ...allowedOrigins];
+  console.log('🔧 CORS allowed origins:', originList);
 
   const corsOptions = {
     origin: (origin, callback) => {
+      console.log('🔍 CORS request from origin:', origin);
+      
       // Allow requests with no origin (mobile apps, Postman, etc.)
       if (!origin) return callback(null, true);
 
       // Check if origin is in the allowed list
+      console.log('🔍 Checking if origin is in list:', originList.includes(origin));
       if (originList.includes(origin)) {
+        console.log('✅ Origin allowed:', origin);
         return callback(null, true);
       }
 
       // Allow Vercel preview deployments
       if (origin.includes('.vercel.app')) {
+        console.log('✅ Vercel origin allowed:', origin);
         return callback(null, true);
       }
 
       // Reject other origins
+      console.log('❌ Origin rejected:', origin);
       callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
