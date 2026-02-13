@@ -2,7 +2,7 @@
     "version": 2,
     "builds": [
         {
-            "src": "api/index.js",
+            "src": "api/**/*.js",
             "use": "@vercel/node",
             "config": {
                 "maxDuration": 30
@@ -11,8 +11,16 @@
     ],
     "routes": [
         {
+            "src": "/api/sync-rider-status",
+            "dest": "/api/sync-rider-status.js"
+        },
+        {
+            "src": "/api/errors",
+            "dest": "/api/errors.js"
+        },
+        {
             "src": "/(.*)",
-            "dest": "api/index.js"
+            "dest": "/api/index.js"
         }
     ]
 }

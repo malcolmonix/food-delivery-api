@@ -1,4 +1,4 @@
-const { gql } = require('apollo-server-express');
+const { gql, AuthenticationError, ForbiddenError, UserInputError, ApolloError } = require('apollo-server-express');
 
 // Dynamic database module selection based on environment
 // Priority: SUPABASE_URL > ENABLE_FIREBASE_STORAGE > memory (fallback)
@@ -20,6 +20,21 @@ const axios = require('axios');
 const FormData = require('form-data');
 const DELIVERMI_URL = process.env.DELIVERMI_URL || 'http://localhost:9010';
 const { schedule, cancel } = require('./notifyScheduler');
+
+// Import vendor enhancements (Week 1, Days 2-3)
+const {
+  vendorResolvers,
+  syncOrderToFirestore,
+  dispatchToRider
+} = require('./schema-vendor-enhancements');
+
+/**
+ * Generate a unique correlation ID for request tracing
+ * Format: timestamp-randomString
+ */
+function generateCorrelationId() {
+  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
 
 const typeDefs = gql`
   scalar Upload
@@ -82,6 +97,12 @@ const typeDefs = gql`
     isOnline: Boolean
     lastStatusUpdate: String
     openingHours: [OpeningHour!]!
+    businessHours: BusinessHours
+    timezone: String
+    autoScheduleEnabled: Boolean
+    lastManualStatusChange: String
+    lastAutoStatusChange: String
+    notificationsSent: NotificationsSent
     createdAt: String!
     updatedAt: String!
   }
@@ -91,6 +112,28 @@ const typeDefs = gql`
     open: String!
     close: String!
     isClosed: Boolean!
+  }
+
+  type DayHours {
+    open: String!
+    close: String!
+    closed: Boolean!
+  }
+
+  type BusinessHours {
+    monday: DayHours!
+    tuesday: DayHours!
+    wednesday: DayHours!
+    thursday: DayHours!
+    friday: DayHours!
+    saturday: DayHours!
+    sunday: DayHours!
+  }
+
+  type NotificationsSent {
+    twoHourWarning: String
+    thirtyMinuteWarning: String
+    lastResetDate: String
   }
 
   type MenuItem {
@@ -171,6 +214,60 @@ const typeDefs = gql`
     note: String
   }
 
+  type OrderTracking {
+    id: ID!
+    orderId: String!
+    restaurantId: String!
+    restaurantName: String!
+    orderStatus: String!
+    deliveryStatus: String
+    paymentMethod: String!
+    orderAmount: Float!
+    deliveryCharges: Float!
+    tipping: Float!
+    taxationAmount: Float!
+    paidAmount: Float!
+    deliveryAddress: String!
+    deliveryLatitude: Float
+    deliveryLongitude: Float
+    instructions: String
+    orderDate: String!
+    createdAt: String!
+    estimatedDeliveryTime: String
+    customer: CustomerInfo!
+    items: [OrderItemInfo!]!
+    rider: RiderInfo
+    statusHistory: [StatusHistoryItem!]!
+  }
+
+  type CustomerInfo {
+    name: String!
+    email: String!
+    phone: String
+    address: String!
+  }
+
+  type OrderItemInfo {
+    id: String!
+    name: String!
+    quantity: Int!
+    price: Float!
+    variation: String
+    addons: String
+  }
+
+  type StatusHistoryItem {
+    status: String!
+    timestamp: String!
+    message: String
+    location: LocationInfo
+  }
+
+  type LocationInfo {
+    latitude: Float!
+    longitude: Float!
+  }
+
   type Ride {
     id: ID!
     rideId: String!
@@ -247,6 +344,8 @@ const typeDefs = gql`
     totalRestaurants: Int!
     totalOrders: Int!
     totalRiders: Int!
+    onlineRiders: Int!
+    offlineRiders: Int!
     totalRevenue: Float!
     averageOrderValue: Float!
     ordersByStatus: [OrderStatusCount!]!
@@ -295,6 +394,7 @@ const typeDefs = gql`
     me: User
     orders: [Order!]!
     order(id: ID!): Order
+    orderTracking(orderId: String!): OrderTracking
     addresses: [Address!]!
     address(id: ID!): Address
     restaurants(search: String, cuisine: String, limit: Int, offset: Int): [Restaurant!]!
@@ -308,6 +408,8 @@ const typeDefs = gql`
     availableOrders: [Order!]!
     # Rider-specific order view
     riderOrder(id: ID!): Order
+    # Vendor order management (Week 1, Days 2-3)
+    restaurantOrders(restaurantId: ID!, status: String): [Order!]!
     # Ride queries
     ride(id: ID!): Ride
     myRides: [Ride!]!
@@ -383,6 +485,11 @@ const typeDefs = gql`
       orderId: ID!
       status: String!
       note: String
+    ): Order!
+    delayOrderPickup(
+      orderId: ID!
+      delayMinutes: Int!
+      reason: String
     ): Order!
     updatePaymentStatus(
       orderId: ID!
@@ -469,6 +576,9 @@ const typeDefs = gql`
     riderUpdateOrderStatus(orderId: ID!, status: String!, code: String): Order!
     riderReportNotReady(orderId: ID!, waitedMinutes: Int): Boolean!
     riderCancelOrder(orderId: ID!, reason: String): Boolean!
+    # Vendor order management (Week 1, Days 2-3)
+    acceptOrder(orderId: ID!): Order!
+    rejectOrder(orderId: ID!, reason: String!): Order!
     # Ride booking mutations
     requestRide(input: RideInput!): Ride!
     acceptRide(rideId: ID!): Ride!
@@ -615,45 +725,66 @@ const resolvers = {
      * TODO: Add admin-specific query for viewing all orders
      */
     orders: async (_, __, { user }) => {
-      // Temporarily allow unauthenticated access for admin panel development
-      // TODO: Re-enable authentication and add proper admin role check
-      // if (!user) throw new Error('Authentication required');
-
-      // If no user, return all orders (for admin panel)
-      // If user exists, return only their orders (for regular users)
-      const orders = user 
-        ? dbHelpers.getOrdersByUser(user.uid)
-        : Array.from(dbHelpers.getOrdersByUser ? [] : []);
-      
-      // For admin panel without auth, return all orders from storage
       if (!user) {
-        // Access all orders directly - this is temporary for development
-        const allOrders = [];
-        try {
-          // Try to get sample orders from the database
-          const sampleUserIds = ['user-1', 'user-2', 'user-3'];
-          for (const userId of sampleUserIds) {
-            const userOrders = await dbHelpers.getOrdersByUser(userId);
-            allOrders.push(...userOrders);
-          }
-        } catch (e) {
-          console.log('Could not fetch orders:', e.message);
+        console.log('⚠️ ORDERS QUERY: No authenticated user');
+        throw new Error('Authentication required');
+      }
+
+      console.log(`📦 ORDERS QUERY: Fetching orders for user ${user.uid}`);
+      
+      try {
+        // Fetch orders for the authenticated user
+        const orders = await dbHelpers.getOrdersByUser(user.uid);
+        console.log(`✅ ORDERS QUERY: Received result:`, {
+          isArray: Array.isArray(orders),
+          count: orders?.length || 0,
+          type: typeof orders,
+          isNull: orders === null,
+          isUndefined: orders === undefined
+        });
+        
+        // Ensure orders is an array
+        if (!orders || !Array.isArray(orders)) {
+          console.log('⚠️ ORDERS QUERY: No orders or orders is not an array, returning empty array');
+          return [];
         }
         
-        return allOrders.map(order => ({
-          ...order,
-          orderItems: JSON.parse(order.orderItems || '[]'),
-          statusHistory: JSON.parse(order.statusHistory || '[]'),
-          isPickedUp: Boolean(order.isPickedUp),
-        }));
-      }
+        console.log(`📋 ORDERS QUERY: Processing ${orders.length} orders`);
+        const processedOrders = orders.map(order => {
+          console.log(`  Processing order ${order.orderId}:`, {
+            hasOrderItems: !!order.orderItems,
+            orderItemsType: typeof order.orderItems,
+            hasStatusHistory: !!order.statusHistory,
+            statusHistoryType: typeof order.statusHistory
+          });
+          
+          // Supabase returns JSONB fields as already-parsed objects/arrays
+          // Only parse if they're strings (for backward compatibility with other DB implementations)
+          const orderItems = typeof order.orderItems === 'string' 
+            ? JSON.parse(order.orderItems || '[]')
+            : (order.orderItems || []);
+          
+          const statusHistory = typeof order.statusHistory === 'string'
+            ? JSON.parse(order.statusHistory || '[]')
+            : (order.statusHistory || []);
+          
+          return {
+            ...order,
+            orderItems,
+            statusHistory,
+            isPickedUp: Boolean(order.isPickedUp),
+          };
+        });
         
-      return orders.map(order => ({
-        ...order,
-        orderItems: JSON.parse(order.orderItems || '[]'),
-        statusHistory: JSON.parse(order.statusHistory || '[]'),
-        isPickedUp: Boolean(order.isPickedUp),
-      }));
+        console.log(`✅ ORDERS QUERY: Successfully processed ${processedOrders.length} orders`);
+        return processedOrders;
+      } catch (error) {
+        console.error('❌ ORDERS QUERY: Error fetching orders:', error);
+        console.error('   Error name:', error.name);
+        console.error('   Error message:', error.message);
+        console.error('   Error stack:', error.stack);
+        throw new Error(`Failed to fetch orders: ${error.message}`);
+      }
     },
     /**
      * Get single order by ID
@@ -665,12 +796,251 @@ const resolvers = {
       if (!order) return null;
       if (order.userId !== user.uid) throw new Error('Access denied');
 
+      // Supabase returns JSONB fields as already-parsed objects/arrays
+      const orderItems = typeof order.orderItems === 'string' 
+        ? JSON.parse(order.orderItems)
+        : order.orderItems;
+      
+      const statusHistory = typeof order.statusHistory === 'string'
+        ? JSON.parse(order.statusHistory)
+        : order.statusHistory;
+
       return {
         ...order,
-        orderItems: JSON.parse(order.orderItems),
-        statusHistory: JSON.parse(order.statusHistory),
+        orderItems,
+        statusHistory,
         isPickedUp: Boolean(order.isPickedUp),
       };
+    },
+    /**
+     * Get order tracking details for customer
+     * Returns comprehensive order information for tracking page
+     * Enhanced with multi-strategy lookup, proper error handling, and security checks
+     * 
+     * DATA SOURCE: Queries ONLY Supabase PostgreSQL via dbHelpers.getOrderByOrderId()
+     * - Firestore is NOT queried for order data
+     * - Firestore only receives real-time sync updates from Supabase
+     * - This ensures single source of truth and data consistency
+     */
+    orderTracking: async (_, { orderId }, { user }) => {
+      const correlationId = generateCorrelationId();
+      
+      try {
+        console.log(`[Resolver:${correlationId}] orderTracking query initiated - orderId: ${orderId}, user: ${user?.uid || 'UNAUTHENTICATED'}`);
+        
+        // Step 1: Authentication check
+        if (!user) {
+          console.warn(`[Resolver:${correlationId}] UNAUTHENTICATED - No user token provided`);
+          throw new AuthenticationError('You must be logged in to view orders');
+        }
+        
+        console.log(`[Resolver:${correlationId}] Authentication verified - user: ${user.uid}`);
+        
+        // Step 2: Fetch order using enhanced database helper
+        console.log(`[Resolver:${correlationId}] Calling database helper for order lookup`);
+        let order = await dbHelpers.getOrderByOrderId(orderId);
+        
+        // Step 2.5: Firestore fallback if order not found in Supabase
+        if (!order) {
+          console.log(`[Resolver:${correlationId}] Order not found in Supabase, checking Firestore fallback`);
+          try {
+            const db = admin.firestore();
+            const orderSnapshot = await db.collection('orders')
+              .where('orderId', '==', orderId)
+              .limit(1)
+              .get();
+            
+            if (!orderSnapshot.empty) {
+              const firestoreOrder = orderSnapshot.docs[0].data();
+              console.log(`[Resolver:${correlationId}] Order found in Firestore - transforming data`);
+              
+              // Transform Firestore data to match expected format
+              order = {
+                id: orderSnapshot.docs[0].id,
+                orderId: firestoreOrder.orderId,
+                userId: firestoreOrder.userId || firestoreOrder.user,
+                riderId: firestoreOrder.riderId || null,
+                restaurant: firestoreOrder.restaurant || firestoreOrder.restaurantId,
+                orderStatus: firestoreOrder.orderStatus || firestoreOrder.status,
+                orderAmount: firestoreOrder.orderAmount || firestoreOrder.totalAmount || 0,
+                paidAmount: firestoreOrder.paidAmount || firestoreOrder.orderAmount || 0,
+                deliveryCharges: firestoreOrder.deliveryCharges || 0,
+                tipping: firestoreOrder.tipping || 0,
+                taxationAmount: firestoreOrder.taxationAmount || 0,
+                paymentMethod: firestoreOrder.paymentMethod || 'CASH',
+                address: firestoreOrder.address || firestoreOrder.deliveryAddress || '',
+                deliveryLatitude: firestoreOrder.deliveryLatitude || null,
+                deliveryLongitude: firestoreOrder.deliveryLongitude || null,
+                instructions: firestoreOrder.instructions || '',
+                orderDate: firestoreOrder.orderDate || firestoreOrder.createdAt,
+                createdAt: firestoreOrder.createdAt,
+                updatedAt: firestoreOrder.updatedAt,
+                expectedTime: firestoreOrder.expectedTime || null,
+                orderItems: firestoreOrder.orderItems || firestoreOrder.items || [],
+                statusHistory: firestoreOrder.statusHistory || [],
+                customer: firestoreOrder.customer || {},
+                pickupCode: firestoreOrder.pickupCode || null,
+                deliveryCode: firestoreOrder.deliveryCode || null,
+              };
+            }
+          } catch (firestoreError) {
+            console.error(`[Resolver:${correlationId}] Firestore fallback error:`, firestoreError);
+          }
+        }
+        
+        // Step 3: Check if order exists
+        if (!order) {
+          console.warn(`[Resolver:${correlationId}] ORDER_NOT_FOUND - orderId: ${orderId}`);
+          throw new UserInputError('Order not found', {
+            code: 'ORDER_NOT_FOUND',
+            orderId
+          });
+        }
+        
+        console.log(`[Resolver:${correlationId}] Order found - internal id: ${order.id}, status: ${order.orderStatus}`);
+        
+        // Step 4: Ownership verification
+        if (order.userId !== user.uid) {
+          console.warn(`[Resolver:${correlationId}] FORBIDDEN - user ${user.uid} attempted to access order owned by ${order.userId}`);
+          // Security: Don't reveal order existence in error message
+          throw new ForbiddenError('You do not have permission to view this order', {
+            code: 'FORBIDDEN'
+          });
+        }
+        
+        console.log(`[Resolver:${correlationId}] Ownership verified - proceeding with data transformation`);
+
+        // Step 5: Parse JSON fields
+        const orderItems = typeof order.orderItems === 'string' 
+          ? JSON.parse(order.orderItems || '[]')
+          : (order.orderItems || []);
+        
+        const statusHistory = typeof order.statusHistory === 'string'
+          ? JSON.parse(order.statusHistory || '[]')
+          : (order.statusHistory || []);
+
+        const customerInfo = typeof order.customer === 'string'
+          ? JSON.parse(order.customer || '{}')
+          : (order.customer || {});
+
+        // Step 6: Get restaurant details
+        let restaurantName = order.restaurant || 'Unknown Restaurant';
+        let restaurantId = order.restaurant;
+        
+        try {
+          const restaurant = await dbHelpers.getRestaurantById(order.restaurant);
+          if (restaurant) {
+            restaurantName = restaurant.name;
+            restaurantId = restaurant.id;
+          }
+        } catch (e) {
+          console.warn(`[Resolver:${correlationId}] Could not fetch restaurant details:`, e.message);
+        }
+
+        // Step 7: Get rider details if assigned
+        let riderInfo = null;
+        if (order.riderId) {
+          try {
+            const rider = await dbHelpers.getUserByUid(order.riderId);
+            if (rider) {
+              riderInfo = {
+                name: rider.displayName || 'Rider',
+                phone: rider.phoneNumber || '',
+                vehicleNumber: rider.vehicleNumber || 'N/A',
+                currentLocation: {
+                  latitude: rider.latitude || 0,
+                  longitude: rider.longitude || 0,
+                },
+              };
+            }
+          } catch (e) {
+            console.warn(`[Resolver:${correlationId}] Could not fetch rider details:`, e.message);
+          }
+        }
+
+        // Step 8: Format order items
+        const formattedItems = orderItems.map(item => ({
+          id: item.id || item.menuItemId || '',
+          name: item.name || '',
+          quantity: item.quantity || 1,
+          price: item.price || 0,
+          variation: item.variation || '',
+          addons: item.addons || '',
+        }));
+
+        // Step 9: Format status history
+        const formattedStatusHistory = statusHistory.map(entry => ({
+          status: entry.status || '',
+          timestamp: entry.timestamp || new Date().toISOString(),
+          message: entry.note || entry.message || '',
+          location: entry.location || null,
+        }));
+
+        // Step 10: Calculate estimated delivery time if not set
+        let estimatedDeliveryTime = order.expectedTime || order.estimatedDeliveryTime;
+        if (!estimatedDeliveryTime && order.orderDate) {
+          // Default: 45 minutes from order time
+          const orderDate = new Date(order.orderDate);
+          estimatedDeliveryTime = new Date(orderDate.getTime() + 45 * 60000).toISOString();
+        }
+
+        // Step 11: Build tracking data response
+        const trackingData = {
+          id: order.id,
+          orderId: order.orderId,
+          restaurantId: restaurantId,
+          restaurantName: restaurantName,
+          orderStatus: order.orderStatus || 'PENDING',
+          deliveryStatus: order.orderStatus || 'PENDING',
+          paymentMethod: order.paymentMethod || 'CASH',
+          orderAmount: order.orderAmount || 0,
+          deliveryCharges: order.deliveryCharges || 0,
+          tipping: order.tipping || 0,
+          taxationAmount: order.taxationAmount || 0,
+          paidAmount: order.paidAmount || order.orderAmount || 0,
+          deliveryAddress: order.address || customerInfo.address || '',
+          deliveryLatitude: order.deliveryLatitude || null,
+          deliveryLongitude: order.deliveryLongitude || null,
+          instructions: order.instructions || '',
+          orderDate: order.orderDate || order.createdAt,
+          createdAt: order.createdAt,
+          estimatedDeliveryTime: estimatedDeliveryTime,
+          customer: {
+            name: customerInfo.name || user.displayName || 'Customer',
+            email: customerInfo.email || user.email || '',
+            phone: customerInfo.phone || user.phoneNumber || '',
+            address: customerInfo.address || order.address || '',
+          },
+          items: formattedItems,
+          rider: riderInfo,
+          statusHistory: formattedStatusHistory,
+        };
+
+        console.log(`[Resolver:${correlationId}] SUCCESS - Returning tracking data for order ${orderId}`);
+        return trackingData;
+
+      } catch (error) {
+        // Step 12: Error transformation and logging
+        console.error(`[Resolver:${correlationId}] ERROR in orderTracking:`, {
+          message: error.message,
+          code: error.extensions?.code,
+          orderId,
+          userId: user?.uid,
+          stack: error.stack
+        });
+        
+        // Re-throw GraphQL errors as-is
+        if (error instanceof AuthenticationError || 
+            error instanceof ForbiddenError || 
+            error instanceof UserInputError) {
+          throw error;
+        }
+        
+        // Wrap unexpected errors
+        throw new ApolloError('Internal server error', 'INTERNAL_ERROR', {
+          correlationId
+        });
+      }
     },
     /**
      * Get all addresses for authenticated user
@@ -840,18 +1210,32 @@ const resolvers = {
     availableOrders: async () => {
       try {
         const orders = await dbHelpers.getAvailableOrders();
-        return orders.map(order => ({
-          ...order,
-          orderItems: JSON.parse(order.orderItems),
-          statusHistory: JSON.parse(order.statusHistory),
-          isPickedUp: Boolean(order.isPickedUp),
-          paymentProcessed: Boolean(order.paymentProcessed),
-        }));
+        return orders.map(order => {
+          const orderItems = typeof order.orderItems === 'string' 
+            ? JSON.parse(order.orderItems)
+            : order.orderItems;
+          const statusHistory = typeof order.statusHistory === 'string'
+            ? JSON.parse(order.statusHistory)
+            : order.statusHistory;
+          
+          return {
+            ...order,
+            orderItems,
+            statusHistory,
+            isPickedUp: Boolean(order.isPickedUp),
+            paymentProcessed: Boolean(order.paymentProcessed),
+          };
+        });
       } catch (error) {
         console.error('Error fetching available orders:', error);
         throw new Error('Failed to fetch available orders');
       }
     },
+    /**
+     * Get orders for a specific restaurant (vendor view)
+     * Week 1, Days 2-3: Vendor Order Management
+     */
+    restaurantOrders: vendorResolvers.Query.restaurantOrders,
     /**
      * Rider-specific single order view (only accessible to assigned rider)
      */
@@ -861,10 +1245,18 @@ const resolvers = {
         const order = dbHelpers.getOrderById(id);
         if (!order) return null;
         if (order.riderId !== user.uid) throw new Error('Access denied');
+        
+        const orderItems = typeof order.orderItems === 'string' 
+          ? JSON.parse(order.orderItems)
+          : order.orderItems;
+        const statusHistory = typeof order.statusHistory === 'string'
+          ? JSON.parse(order.statusHistory)
+          : order.statusHistory;
+        
         return {
           ...order,
-          orderItems: JSON.parse(order.orderItems),
-          statusHistory: JSON.parse(order.statusHistory),
+          orderItems,
+          statusHistory,
           isPickedUp: Boolean(order.isPickedUp),
           paymentProcessed: Boolean(order.paymentProcessed),
         };
@@ -1440,6 +1832,37 @@ const resolvers = {
       if (!user) throw new Error('Authentication required');
 
       try {
+        // ✅ Validate restaurant ID
+        if (!restaurant || restaurant.trim() === '') {
+          throw new Error('Restaurant ID is required');
+        }
+
+        // ✅ Verify restaurant exists in Firestore
+        if (admin && admin.firestore) {
+          const firestore = admin.firestore();
+          
+          // Check eateries collection first (legacy)
+          const eateryDoc = await firestore.collection('eateries').doc(restaurant).get();
+          
+          if (!eateryDoc.exists) {
+            // Check restaurants collection
+            const restaurantsQuery = await firestore
+              .collection('restaurants')
+              .where('id', '==', restaurant)
+              .limit(1)
+              .get();
+            
+            if (restaurantsQuery.empty) {
+              console.error(`❌ Restaurant ${restaurant} not found in Firestore`);
+              throw new Error(`Restaurant ${restaurant} not found. Please select a valid restaurant.`);
+            }
+            
+            console.log(`✅ Validated restaurant ID: ${restaurant} (from restaurants collection)`);
+          } else {
+            console.log(`✅ Validated restaurant ID: ${restaurant} (from eateries collection)`);
+          }
+        }
+
         // Ensure user exists in Supabase
         await ensureUserSynced(user);
 
@@ -1497,6 +1920,16 @@ const resolvers = {
         console.log('Attempting to save order to database...');
         const id = dbHelpers.createOrder(orderData);
         console.log('Order saved successfully with ID:', id);
+
+        // Sync to Firestore for real-time updates (vendors, customers, admin)
+        try {
+          console.log('🔄 Syncing order to Firestore...');
+          await syncOrderToFirestore(id, dbHelpers);
+          console.log('✅ Order synced to Firestore successfully');
+        } catch (firestoreErr) {
+          console.error('❌ Failed to sync order to Firestore:', firestoreErr.message || firestoreErr);
+          // Don't fail the order placement if Firestore sync fails
+        }
 
         // Send push notification to riders via FCM when a new available order is placed
         try {
@@ -1625,6 +2058,24 @@ const resolvers = {
 
         console.log(`Order ${orderId} status updated: ${currentStatus} → ${status}`);
 
+        // Week 1, Days 2-3: Sync to Firestore for real-time updates
+        try {
+          await syncOrderToFirestore(orderId, dbHelpers);
+          console.log(`✅ Order ${orderId} synced to Firestore`);
+        } catch (syncErr) {
+          console.warn('⚠️ Firestore sync failed (non-critical):', syncErr.message);
+        }
+
+        // Week 1, Days 2-3: Auto-dispatch when order marked as READY
+        if (status === 'READY') {
+          try {
+            await dispatchToRider(orderId, dbHelpers);
+            console.log(`✅ Order ${orderId} dispatched to nearest rider`);
+          } catch (dispatchErr) {
+            console.warn('⚠️ Auto-dispatch failed (non-critical):', dispatchErr.message);
+          }
+        }
+
         // Notify riders when order enters preparing/processing or ready/out-for-delivery states
         try {
           const notifyStatuses = ['PROCESSING', 'PREPARING', 'READY', 'READY_FOR_PICKUP', 'OUT_FOR_DELIVERY'];
@@ -1749,6 +2200,141 @@ const resolvers = {
       } catch (error) {
         console.error('Error updating order status:', error);
         throw new Error('Failed to update order status: ' + error.message);
+      }
+    },
+    /**
+     * Delay order pickup time by 5-30 minutes
+     * Vendor feature to adjust preparation time during busy periods
+     */
+    delayOrderPickup: async (_, { orderId, delayMinutes, reason }, { user }) => {
+      if (!user) throw new Error('Authentication required');
+
+      try {
+        // Validate delay range (5-30 minutes)
+        if (delayMinutes < 5 || delayMinutes > 30) {
+          throw new Error('Delay must be between 5 and 30 minutes');
+        }
+
+        // Get current order
+        const currentOrder = await dbHelpers.getOrderById(orderId);
+        if (!currentOrder) {
+          throw new Error('Order not found');
+        }
+
+        // Verify user is the restaurant owner
+        let isRestaurantOwner = false;
+        try {
+          const restaurant = await dbHelpers.getRestaurantById(currentOrder.restaurant);
+          if (restaurant && restaurant.ownerId === user.uid) {
+            isRestaurantOwner = true;
+          }
+        } catch (e) {
+          console.warn('Could not verify restaurant ownership:', e.message);
+        }
+
+        if (!isRestaurantOwner) {
+          throw new Error('Access denied: Only restaurant owners can delay orders');
+        }
+
+        // Check if order is in a state that can be delayed
+        const delayableStatuses = ['CONFIRMED', 'PROCESSING', 'PREPARING'];
+        if (!delayableStatuses.includes(currentOrder.orderStatus)) {
+          throw new Error(`Cannot delay order in ${currentOrder.orderStatus} status. Order must be CONFIRMED, PROCESSING, or PREPARING.`);
+        }
+
+        // Calculate new expected time
+        const currentExpectedTime = new Date(currentOrder.expectedTime || currentOrder.orderDate);
+        const newExpectedTime = new Date(currentExpectedTime.getTime() + delayMinutes * 60000);
+
+        // Update order
+        const statusHistory = JSON.parse(currentOrder.statusHistory || '[]');
+        statusHistory.push({
+          status: 'DELAYED',
+          timestamp: new Date().toISOString(),
+          note: reason || `Pickup delayed by ${delayMinutes} minutes`,
+          delayMinutes
+        });
+
+        await dbHelpers.updateOrder(orderId, {
+          expectedTime: newExpectedTime.toISOString(),
+          statusHistory: JSON.stringify(statusHistory),
+          delayedAt: new Date().toISOString(),
+          delayReason: reason || 'Vendor requested delay',
+          updatedAt: new Date().toISOString()
+        });
+
+        console.log(`⏰ Order ${orderId} delayed by ${delayMinutes} minutes. New ETA: ${newExpectedTime.toISOString()}`);
+
+        // Sync to Firestore for real-time updates
+        try {
+          await syncOrderToFirestore(orderId, dbHelpers);
+          console.log(`✅ Order ${orderId} delay synced to Firestore`);
+        } catch (syncErr) {
+          console.warn('⚠️ Firestore sync failed (non-critical):', syncErr.message);
+        }
+
+        // Notify customer about the delay
+        try {
+          if (admin && admin.messaging) {
+            const customerTokens = await getDeviceTokensForUser(currentOrder.userId);
+            if (customerTokens && customerTokens.length > 0) {
+              const message = {
+                notification: {
+                  title: 'Order Delayed',
+                  body: `Your order will be ready in ${delayMinutes} more minutes. ${reason || 'The restaurant is experiencing high demand.'}`,
+                },
+                data: {
+                  type: 'ORDER_DELAYED',
+                  orderId: orderId,
+                  delayMinutes: delayMinutes.toString(),
+                  newExpectedTime: newExpectedTime.toISOString(),
+                  reason: reason || 'Vendor requested delay'
+                },
+                tokens: customerTokens
+              };
+
+              await admin.messaging().sendEachForMulticast(message);
+              console.log(`📱 Delay notification sent to customer ${currentOrder.userId}`);
+            }
+          }
+        } catch (notifyErr) {
+          console.warn('⚠️ Customer notification failed (non-critical):', notifyErr.message);
+        }
+
+        // Notify assigned rider about the delay
+        try {
+          if (currentOrder.riderId && admin && admin.messaging) {
+            const riderTokens = await getDeviceTokensForUser(currentOrder.riderId);
+            if (riderTokens && riderTokens.length > 0) {
+              const message = {
+                notification: {
+                  title: 'Pickup Time Updated',
+                  body: `New pickup time: ${newExpectedTime.toLocaleTimeString()}. Delayed by ${delayMinutes} minutes.`,
+                },
+                data: {
+                  type: 'PICKUP_DELAYED',
+                  orderId: orderId,
+                  delayMinutes: delayMinutes.toString(),
+                  newExpectedTime: newExpectedTime.toISOString()
+                },
+                tokens: riderTokens
+              };
+
+              await admin.messaging().sendEachForMulticast(message);
+              console.log(`📱 Delay notification sent to rider ${currentOrder.riderId}`);
+            }
+          }
+        } catch (notifyErr) {
+          console.warn('⚠️ Rider notification failed (non-critical):', notifyErr.message);
+        }
+
+        // Return updated order
+        const updatedOrder = await dbHelpers.getOrderById(orderId);
+        return updatedOrder;
+
+      } catch (error) {
+        console.error('❌ Error delaying order pickup:', error);
+        throw error;
       }
     },
     /**
@@ -2294,7 +2880,9 @@ const resolvers = {
         }
 
         const now = new Date().toISOString();
-        const statusHistory = JSON.parse(order.statusHistory || '[]');
+        const statusHistory = typeof order.statusHistory === 'string'
+          ? JSON.parse(order.statusHistory || '[]')
+          : (order.statusHistory || []);
         statusHistory.push({ status, timestamp: now, note: `Rider ${user.uid} set status ${status}` });
 
         const updates = {
@@ -2337,7 +2925,9 @@ const resolvers = {
         if (!order.riderId || order.riderId !== user.uid) throw new Error('Access denied: Not assigned to this rider');
 
         const now = new Date().toISOString();
-        const statusHistory = JSON.parse(order.statusHistory || '[]');
+        const statusHistory = typeof order.statusHistory === 'string'
+          ? JSON.parse(order.statusHistory || '[]')
+          : (order.statusHistory || []);
         statusHistory.push({ status: 'NOT_READY', timestamp: now, note: `Rider ${user.uid} waited ${waitedMinutes}m` });
 
         dbHelpers.updateOrder(orderId, {
@@ -2391,7 +2981,9 @@ const resolvers = {
         if (Date.now() < expected + 15 * 60 * 1000) throw new Error('Too early to cancel: driver must wait longer before cancel');
 
         const now = new Date().toISOString();
-        const statusHistory = JSON.parse(order.statusHistory || '[]');
+        const statusHistory = typeof order.statusHistory === 'string'
+          ? JSON.parse(order.statusHistory || '[]')
+          : (order.statusHistory || []);
         statusHistory.push({ status: 'CANCELLED_BY_RIDER', timestamp: now, note: `Rider ${user.uid} cancelled: ${reason}` });
 
         dbHelpers.updateOrder(orderId, {
@@ -2407,6 +2999,16 @@ const resolvers = {
         throw new Error('Failed to cancel order');
       }
     },
+
+    /**
+     * Vendor accepts an order (Week 1, Days 2-3)
+     */
+    acceptOrder: vendorResolvers.Mutation.acceptOrder,
+
+    /**
+     * Vendor rejects an order with reason (Week 1, Days 2-3)
+     */
+    rejectOrder: vendorResolvers.Mutation.rejectOrder,
 
     /**
      * Request a new ride (Phase 3: creates in pending subcollection)

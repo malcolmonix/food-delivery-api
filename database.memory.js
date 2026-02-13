@@ -542,6 +542,25 @@ const dbHelpers = {
     return null;
   },
 
+  async updateRide(id, updates) {
+    const ride = storage.rides.get(id);
+    if (!ride) return null;
+
+    const { id: _, ...cleanUpdates } = updates;
+
+    if (Object.keys(cleanUpdates).length === 0) return ride;
+
+    const updatedRide = {
+      ...ride,
+      ...cleanUpdates,
+      updatedAt: new Date().toISOString()
+    };
+
+    storage.rides.set(id, updatedRide);
+    console.log('✅ Ride updated in memory:', id);
+    return updatedRide;
+  },
+
   async getPendingRides() {
     return Array.from(storage.rides.values())
       .filter(ride => ride.status === 'REQUESTED' && !ride.riderId)
@@ -575,7 +594,12 @@ const dbHelpers = {
     const totalUsers = users.length;
     const totalRestaurants = restaurants.length;
     const totalOrders = orders.length;
-    const totalRiders = users.filter(user => user.userType === 'rider').length;
+    
+    // Count riders by user_type and online status
+    const riders = users.filter(user => user.userType === 'rider');
+    const totalRiders = riders.length;
+    const onlineRiders = riders.filter(rider => rider.isOnline === true).length;
+    const offlineRiders = totalRiders - onlineRiders;
 
     // Calculate revenue from orders
     const totalRevenue = orders.reduce((sum, order) => {
@@ -673,12 +697,16 @@ const dbHelpers = {
       totalRestaurants,
       totalOrders,
       totalRiders,
+      onlineRiders,
+      offlineRiders,
       totalRevenue,
       averageOrderValue,
       ordersByStatus,
       topRestaurants,
       topRiders,
       lastUpdated: new Date().toISOString()
+    };
+  },
     };
   }
 };

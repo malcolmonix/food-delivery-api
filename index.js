@@ -85,6 +85,23 @@ async function startServer() {
   // Handle preflight quickly
   app.options('*', cors(corsOptions));
 
+  // Cache-busting middleware for statistics and real-time data
+  // Prevents browser and proxy caching of dynamic data
+  app.use((req, res, next) => {
+    // Apply cache-busting headers to all GraphQL requests and statistics endpoints
+    if (req.path.includes('/graphql') || req.path.includes('/statistics') || req.path.includes('/api/')) {
+      res.set({
+        'Cache-Control': 'no-store, no-cache, must-revalidate, private, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Surrogate-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      console.log('🚫 Cache-busting headers applied to:', req.path);
+    }
+    next();
+  });
+
   // Authentication middleware using Firebase Auth
   const authMiddleware = async (req, res, next) => {
     const authHeader = req.headers.authorization || '';
